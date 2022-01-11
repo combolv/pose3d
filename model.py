@@ -296,7 +296,7 @@ class HandObj(nn.Module):
     """
 
     def __init__(self, batch_size, ncomps, poseCoeff, trans, beta, kps2d, vis,
-                 handseg, objmask, handdpt, handpcd, camMat, crop=(0, 1080, 0, 1920), size=1920):
+                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920):
         super(HandObj, self).__init__()
         self.batch_size = batch_size
         self.theta = nn.Parameter(torch.FloatTensor(
@@ -310,7 +310,7 @@ class HandObj(nn.Module):
         self.pcdloss = EMDLoss()
         self.cam2pix = projCamera(camMat)
         self.Kps3Dto2D = projKps(camMat)
-        self.poseConstraint = Constraints()
+        self.poseConstraint = Constraints(gpu)
 
         self.seg = nn.Parameter(torch.FloatTensor(handseg))
 

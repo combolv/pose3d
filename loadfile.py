@@ -4,7 +4,7 @@ import json
 import os
 import cv2
 import open3d as o3d
-
+import pickle
 
 def get_color_map(N=256):
     def bitget(byteval, idx):
@@ -329,6 +329,64 @@ def parse_json(file_pth):  # one hand only
             'vis': kps_vis,
             'num': kps_cnt
             }
+
+
+def read_mask2bbox_hand(filename, hand_color=2):
+    h, w = 1980, 1080
+    mask = cv2.imread(filename)
+    hand_idx = np.where((mask == hand_color).all(axis=2))
+    # print(hand_idx)
+    # newmask = np.zeros((1080,1920,3))
+    # newmask[hand_idx] = [255,0,0]
+    # cv2.imwrite('mask.png', newmask)
+    min_x, max_x = np.min(hand_idx[0]), np.max(hand_idx[0])
+    min_y, max_y = np.min(hand_idx[1]), np.max(hand_idx[1])
+    # print(min_x, max_x, min_y, max_y)
+
+    x_size = max_x - min_x
+    y_size = max_y - min_y
+    crop_max_x = max_x + x_size / 2
+    crop_min_x = min_x - x_size / 2
+    crop_max_y = max_y + y_size / 2
+    crop_min_y = min_y - y_size / 2
+    crop_y_size = crop_max_y - crop_min_y
+    crop_x_size = crop_max_x - crop_min_x
+    if crop_x_size > crop_y_size:  # y size expand
+        crop_max_y = crop_min_y + crop_x_size
+    else:  # crop_y_size > crop_x_size, x size expand
+        crop_max_x = crop_min_x + crop_y_size
+    return int(crop_min_x), int(crop_max_x), int(crop_min_y), int(crop_max_y), int(-crop_min_x), int(-crop_min_y)
+
+
+def read_mask_reverse(file, hand_color=2, obj_color=1, dscale=10, crop=(0, 1080, 0, 1920)):
+    color_map = get_color_map()
+    h, w = int(round((crop[3]-crop[2]) / dscale)
+               ), int(round((crop[1]-crop[0]) / dscale))
+    mask = cv2.imread(file)
+    mask = cv2.resize(mask, (1920, 1080), interpolation=cv2.INTER_NEAREST)
+    mask_pad = np.pad(mask, ((540, 540), (960, 960), (0, 0)))
+    mask = mask_pad[crop[0]+540:crop[1]+540, crop[2]+960:crop[3]+960, :]
+    # print(mask.shape)
+
+    # [crop[0]:crop[1], crop[2]:crop[3], :]
+
+    hand_idx = np.where((mask == hand_color).all(axis=2))
+    obj_idx = np.where((mask == obj_color).all(axis=2))
+    hand_mask = np.zeros((w, h, 3), dtype=np.float32)
+    obj_mask = np.ones((w, h, 3), dtype=np.float32)
+    obj_mask[obj_idx] = [0, 0, 0]
+    hand_mask[hand_idx] = [1, 1, 1]
+    return obj_mask, hand_mask
+
+
+def loadPickleData(fName):
+    with open(fName, 'rb') as f:
+        try:
+            pickData = pickle.load(f, encoding='latin1')
+        except:
+            pickData = pickle.load(f)
+
+    return pickData
 
 if __name__ == "__main__":
     # test()
