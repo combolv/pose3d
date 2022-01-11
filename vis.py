@@ -8,6 +8,7 @@ warnings.filterwarnings("ignore")
 import os
 import cv2
 import copy
+import math
 
 '''
 def read_anno2(file):
@@ -150,3 +151,105 @@ def vis_depth(depth, output_file, crop_list=None):
     cv2.imwrite(output_file, depth)
 
 
+
+def showHandJoints(imgInOrg, gtIn, estIn=None, filename=None, upscale=1, lineThickness=3):
+    '''
+    Utility function for displaying hand annotations
+    :param imgIn: image on which annotation is shown
+    :param gtIn: ground truth annotation
+    :param estIn: estimated keypoints
+    :param filename: dump image name
+    :param upscale: scale factor
+    :param lineThickness:
+    :return:
+    '''
+
+    imgIn = np.copy(imgInOrg)
+
+    # Set color for each finger
+    joint_color_code = [[139, 53, 255],
+                        [0, 56, 255],
+                        [43, 140, 237],
+                        [37, 168, 36],
+                        [147, 147, 0],
+                        [70, 17, 145]]
+
+    limbs = [[0, 1],
+             [1, 2],
+             [2, 3],
+             [3, 4],
+             [0, 5],
+             [5, 6],
+             [6, 7],
+             [7, 8],
+             [0, 9],
+             [9, 10],
+             [10, 11],
+             [11, 12],
+             [0, 13],
+             [13, 14],
+             [14, 15],
+             [15, 16],
+             [0, 17],
+             [17, 18],
+             [18, 19],
+             [19, 20]
+             ]
+
+    PYTHON_VERSION = 3
+
+    for joint_num in range(gtIn.shape[0]):
+
+        color_code_num = (joint_num // 4)
+        if joint_num in [0, 4, 8, 12, 16]:
+            if PYTHON_VERSION == 3:
+                joint_color = list(
+                    map(lambda x: x + 35 * (joint_num % 4), joint_color_code[color_code_num]))
+            else:
+                joint_color = map(lambda x: x + 35 * (joint_num %
+                                  4), joint_color_code[color_code_num])
+
+            cv2.circle(imgIn, center=(
+                gtIn[joint_num][0], gtIn[joint_num][1]), radius=3, color=joint_color, thickness=-1)
+        else:
+            if PYTHON_VERSION == 3:
+                joint_color = list(
+                    map(lambda x: x + 35 * (joint_num % 4), joint_color_code[color_code_num]))
+            else:
+                joint_color = map(lambda x: x + 35 * (joint_num %
+                                  4), joint_color_code[color_code_num])
+
+            cv2.circle(imgIn, center=(
+                gtIn[joint_num][0], gtIn[joint_num][1]), radius=3, color=joint_color, thickness=-1)
+
+    for limb_num in range(len(limbs)):
+
+        x1 = gtIn[limbs[limb_num][0], 1]
+        y1 = gtIn[limbs[limb_num][0], 0]
+        x2 = gtIn[limbs[limb_num][1], 1]
+        y2 = gtIn[limbs[limb_num][1], 0]
+        length = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+        if length < 150 and length > 5:
+            deg = math.degrees(math.atan2(x1 - x2, y1 - y2))
+            polygon = cv2.ellipse2Poly((int((y1 + y2) / 2), int((x1 + x2) / 2)),
+                                       (int(length / 2), 3),
+                                       int(deg),
+                                       0, 360, 1)
+            color_code_num = limb_num // 4
+            if PYTHON_VERSION == 3:
+                limb_color = list(
+                    map(lambda x: x + 35 * (limb_num % 4), joint_color_code[color_code_num]))
+            else:
+                limb_color = map(lambda x: x + 35 * (limb_num %
+                                 4), joint_color_code[color_code_num])
+
+            cv2.fillConvexPoly(imgIn, polygon, color=limb_color)
+
+    if filename is not None:
+        cv2.imwrite(filename, imgIn)
+    else:
+        cv2.imshow('kp+rgb',imgIn)
+        cv2.waitKey(0)
+
+
+    return imgIn
