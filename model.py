@@ -9,6 +9,11 @@ import argparse
 import cv2
 import open3d as o3d
 
+from manopth.manopth.manolayer import ManoLayer
+from manopth.manopth import demo
+
+from vis import *
+
 import soft_renderer.functional as srf
 from emd import EMDLoss
 
@@ -53,6 +58,28 @@ class projCamera(nn.Module):
         ret2 = - self.yscale * mesh[..., 1] / mesh[..., 2]
         ret3 = mesh[..., 2]
         return torch.stack([ret1, ret2, ret3], dim=-1)
+
+
+class projKps(nn.Module):
+    """
+    Perspective Camera Projection
+    camera coordinate -> pixel coordinate
+    x = fx * x / z
+    y = - fy * y / z
+    """
+
+    def __init__(self, camMat):
+        super(projKps, self).__init__()
+        self.xscale = camMat[0, 0] / 1000
+        self.yscale = camMat[1, 1] / 1000
+
+    def forward(self, mesh):
+        ret1 = self.xscale * mesh[..., 0] / mesh[..., 2]
+        # SoftRas uses a left-hand coordinate system
+        ret2 = self.yscale * mesh[..., 1] / mesh[..., 2]
+        ret3 = mesh[..., 2]
+        return torch.stack([ret1, ret2, ret3], dim=-1)
+
 
 
 class PlainObj(nn.Module):
@@ -188,14 +215,199 @@ class ArtObj(nn.Module):
         raise NotImplementedError
 
 
+class Constraints(nn.Module):
+    """
+    Hand pose constraints
+    """
+
+    def __init__(self, cuda_id):
+        super(Constraints, self).__init__()
+        cuda_device = cuda_id
+        self.thetaLimits()
+    def thetaLimits(self):
+        MINBOUND = -5.
+        MAXBOUND = 5.
+        self.validThetaIDs = torch.IntTensor([0, 1, 2, 3, 4, 5, 6, 8, 11, 13, 14, 15, 17, 20, 21, 22, 23, 25, 26, 29,
+                                              30, 31, 32, 33, 35, 38, 39, 40, 41, 42, 44, 46, 47]).long().to(self.cuda_device)#!!!?
+        #7,9,10,12,16,18,19,24,27,28,34,36,37,43,45 15个
+        #48-15=33个
+        # self.invalidThetaIDs = np.array([7, 9, 10, 12, 16, 18, 19, 24,
+        #                                25, 27, 28, 34, 36, 37, 39, 43, 45], dtype=np.int32)
+        invalidThetaIDsList = []
+        for i in range(48):
+            if i not in self.validThetaIDs:
+                invalidThetaIDsList.append(i)
+        self.invalidThetaIDs = np.array(invalidThetaIDsList)
+
+        self.minThetaVals = torch.FloatTensor([MINBOUND, MINBOUND, MINBOUND,  # global rot
+                                      0, -0.15, 0.1, -0.3, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # index
+                                      MINBOUND, -0.15, 0.1, -0.5, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # middle
+                                      -1.5, -0.15, -0.1, MINBOUND, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # pinky
+                                      -0.5, -0.25, 0.1, -0.4, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # ring
+                                               MINBOUND, -0.83, -0.0, -0.15, MINBOUND, 0, MINBOUND, -0.5, -1.57, ]).to(self.cuda_device)  # thumb
+
+        self.maxThetaVals = torch.FloatTensor([MAXBOUND, MAXBOUND, MAXBOUND,  # global
+                                      0.45, 0.2, 1.8, 0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # index
+                                      MAXBOUND, 0.15, 2.0, -0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # middle
+                                      -0.2, 0.15, 1.6, MAXBOUND, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # pinky
+                                      -0.4, 0.10, 1.6, -0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # ring
+                                               MAXBOUND, 0.66, 0.5, 1.6, MAXBOUND, 0.5, MAXBOUND, 0, 1.08]).to(cuda_device)  # thumb
+
+        self.fullThetaMat = np.zeros(
+            (48, len(self.validThetaIDs)), dtype=np.float32)  # 48x25
+        for i in range(len(self.validThetaIDs)):
+            self.fullThetaMat[self.validThetaIDs[i], i] = 1.0
+        self.minThetaVals.requires_grad = False
+        self.maxThetaVals.requires_grad = False
+
+    def forward(self, theta, isValidTheta=False):
+        '''
+        get constraints on the joint angles when input is theta vector itself (first 3 elems are NOT global rot)
+        :param theta: Nx45 tensor if isValidTheta is False and Nx25 if isValidTheta is True
+        :param isValidTheta:
+        :return:
+        '''
+        if not isValidTheta:
+            assert (theta.shape)[-1] == 45
+            validTheta = theta[self.validThetaIDs[3:] - 3]
+            #使用的fullpose只有0, 1, 2, 3, 5, 8, 10, 11, 12, 14, 17, 18, 19, 20, 22, 23, 26,
+            #27, 28, 29, 30, 32, 35, 36, 37, 38, 39, 41, 43, 44
+        else:
+            assert (theta.shape)[-1] == len(self.validThetaIDs[3:])
+            validTheta = theta
+
+        phyConstMax = (torch.maximum(
+            self.minThetaVals[self.validThetaIDs[3:]] - validTheta, torch.zeros(30).to(self.cuda_device)))
+        phyConstMin = (torch.maximum(
+            validTheta - self.maxThetaVals[self.validThetaIDs[3:]], torch.zeros(30).to(self.cuda_device)))
+
+        return phyConstMin, phyConstMax
+
+
 class HandObj(nn.Module):
     """
-    Support hands
-    Not implemented yet
+    SingleFrame Hand Pose Refine
+    theta*30, beta, t, gt_seg, gt_dpt, gt_pcd, phy_cons, ... -> losses
+    hand_v = mano(theta, beta) + T
+    pcd_loss = EMDloss(hand_v, gt_pcd)
+    rendered_seg, rendered_dpt = SoftRas(projected_faces)
+    seg_loss = ~HandMask * l1_loss(rendered_seg, gt_seg)
+    dpt_loss = ~HandMask * l2_loss(rendered_dpt, gt_dpt)
     """
-    def __int__(self):
+
+    def __init__(self, batch_size, ncomps, poseCoeff, trans, beta, kps2d, vis,
+                 handseg, objmask, handdpt, handpcd, camMat, crop=(0, 1080, 0, 1920), size=1920):
         super(HandObj, self).__init__()
-        raise NotImplementedError
+        self.batch_size = batch_size
+        self.theta = nn.Parameter(torch.FloatTensor(
+            poseCoeff).expand(batch_size, poseCoeff.shape[0]))
+        self.beta = nn.Parameter(torch.FloatTensor(
+            beta).expand(batch_size, beta.shape[0]))
+        self.trans = nn.Parameter(torch.FloatTensor(trans))
+
+        self.mano_layer = ManoLayer(
+            mano_root='manopth/mano/models', use_pca=True, ncomps=ncomps, flat_hand_mean=False)
+        self.pcdloss = EMDLoss()
+        self.cam2pix = projCamera(camMat)
+        self.Kps3Dto2D = projKps(camMat)
+        self.poseConstraint = Constraints()
+
+        self.seg = nn.Parameter(torch.FloatTensor(handseg))
+
+        self.dpt = nn.Parameter(torch.stack(
+            [torch.FloatTensor(handdpt)]*3, dim=-1))
+        self.msk = nn.Parameter(torch.FloatTensor(objmask))
+        self.pcd = nn.Parameter(torch.FloatTensor(handpcd))
+        self.kps2d = nn.Parameter(torch.FloatTensor(kps2d))
+        self.vis = nn.Parameter(torch.FloatTensor(vis))
+        self.seg.requires_grad = False
+        self.dpt.requires_grad = False
+        self.pcd.requires_grad = False
+        self.kps2d.requires_grad = False
+        self.vis.requires_grad = False
+        self.beta.requires_grad = False
+
+        self.imsize = size
+        self.crop = crop
+        self.center = torch.FloatTensor([960, 540])
+        self.center.requires_grad = False
+        self.camMat = torch.FloatTensor(camMat)
+        self.camMat.requires_grad = False
+
+    def forward(self):
+        hand_verts, hand_joints, full_pose = self.mano_layer(
+            self.theta, self.beta)
+        # hand_fullpose = self.mano_layer.th_comps
+        hand_faces_index = self.mano_layer.th_faces.detach().cpu().numpy()
+        hand_faces = hand_verts[0, hand_faces_index]  # !!
+        # print(hand_faces_index.shape)
+        # print(hand_faces.shape)
+        transformed_verts = hand_verts/1000.0 + self.trans
+        transformed_joints = hand_joints/1000.0 + self.trans
+        transformed_faces = hand_faces/1000.0 + self.trans
+
+        projected_faces = self.cam2pix(transformed_faces)
+        projected_faces = projected_faces.unsqueeze(0)
+
+        projected_joints = torch.stack((self.Kps3Dto2D(transformed_joints)[0, :, 0]*self.camMat[0][0]+self.center[0],
+                                        self.Kps3Dto2D(transformed_joints)[0, :, 1]*self.camMat[1][1]+self.center[1]), dim=1)
+
+        # print(transformed_faces.shape)
+        # print(projected_joints)
+
+        depth = torch.stack([projected_faces[..., 2]]*3, dim=-1)
+        # print(depth.shape)
+        # assert False
+        render_result = srf.soft_rasterize(projected_faces, depth,
+                                           self.imsize, texture_type='vertex', near=0.5)
+        pad_size = int(round(self.imsize/2))
+        render_result = F.pad(
+            render_result, (pad_size, pad_size, pad_size, pad_size))
+        # print(self.crop,'before')
+        render_result = render_result.squeeze(0).permute((1, 2, 0))
+        # print(render_result.shape, 'result')
+        # print(self.crop, 'after')
+        rendered_depth = render_result[self.crop[0]+pad_size:self.crop[1]+pad_size,
+                                       self.crop[2]+pad_size:self.crop[3]+pad_size, :3]
+        rendered_seg = render_result[self.crop[0]+pad_size:self.crop[1]+pad_size,
+                                     self.crop[2]+pad_size:self.crop[3]+pad_size, 3]
+
+        # print(render_result.shape, 'render result')
+        # print(rendered_seg.shape, 'renderseg')
+        # print(self.seg.shape,'self')
+        # print(self.msk.shape, 'msk')
+
+        constMin, constMax = self.poseConstraint(full_pose[0][3:])
+        constMin_loss = torch.norm(constMin)
+        constMax_loss = torch.norm(constMax)
+        invalidTheta_loss = torch.norm(
+            full_pose[0][self.poseConstraint.invalidThetaIDs])
+
+        pcd_loss = self.pcdloss(
+            transformed_verts.contiguous(), self.pcd.unsqueeze(0))
+        seg_loss = torch.mean(
+            torch.abs(rendered_seg - self.seg[:, :, 0]) * self.msk[:, :, 0])
+        dpt_loss = torch.mean(torch.square(
+            rendered_depth - self.dpt) * self.msk)
+
+        # print(projected_joints, self.kps2d, self.vis)
+        # print(projected_joints.shape, self.kps2d.shape, self.vis.shape)
+        # print((projected_joints - self.kps2d)*self.vis)
+
+        kps2d_loss = torch.mean(torch.square(
+            (projected_joints - self.kps2d) * self.vis))
+        # print((projected_joints - self.kps2d)*self.vis)
+
+        results = {
+            'seg': rendered_seg,
+            'dep': rendered_depth,
+            '2Djoints': projected_joints
+        }
+
+        return pcd_loss, seg_loss, dpt_loss, kps2d_loss, constMin_loss, constMax_loss, \
+            invalidTheta_loss, results
+
+
 
 
 """

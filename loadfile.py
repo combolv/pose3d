@@ -308,6 +308,28 @@ def every_path_generator_from_total_json(total_path, required_range=None):
         yield all_ret_list
 
 
+def parse_json(file_pth):  # one hand only
+    json_pth = file_pth
+    with open(json_pth) as j:
+        dic = json.load(j)
+        kps_cnt = len(dic['markResult']['objects'][0]['features'])
+        kps_coord = []
+        kps_label = []
+        kps_vis = []
+        for i in range(kps_cnt):
+            kps_coord.append(dic['markResult']['objects']
+                             [0]['features'][i]['geometry']['coordinates'])
+            kps_label.append(
+                int(dic['markResult']['objects'][0]['features'][i]['properties']['label']))
+            kps_vis.append(dic['markResult']['objects'][0]['features']
+                           [i]['properties']['content']['Occlude'] == 'visible')
+
+    return {'coord': kps_coord,
+            'label': kps_label,
+            'vis': kps_vis,
+            'num': kps_cnt
+            }
+
 if __name__ == "__main__":
     # test()
     raise NotImplementedError('You should run main.py instead of loadfile.py')
