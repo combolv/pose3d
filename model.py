@@ -92,7 +92,7 @@ class PlainObj(nn.Module):
     seg_loss = ~HandMask * l1_loss(rendered_seg, gt_seg)
     dpt_loss = ~HandMask * l2_loss(rendered_dpt, gt_dpt)
     """
-    def __init__(self, rotvec, trans, vertices, triangles, objseg, handMask, objdpt, pcd, camMat, crop=(0,1080,0,1920), size=1920):
+    def __init__(self, rotvec, trans, vertices, triangles, objseg, handMask, objdpt, pcd, camMat, crop, size=1920):
         super(PlainObj, self).__init__()
         self.rotvec = nn.Parameter(torch.FloatTensor(rotvec))
         self.trans = nn.Parameter(torch.FloatTensor(trans))
@@ -115,8 +115,11 @@ class PlainObj(nn.Module):
         self.msk.requires_grad = False
         self.pcd.requires_grad = False
 
+        x1, x2, y1, y2 = crop
+        self.crop = [x1 - int(np.round(camMat[1, 2])) + 960, x2 - int(np.round(camMat[1, 2])) + 960,
+                     y1 - int(np.round(camMat[0, 2])) + 960, y2 - int(np.round(camMat[0, 2])) + 960]
+
         self.imsize = size
-        self.crop = crop
 
     def forward(self):
         R_inv = self.vec2mat(self.rotvec)
@@ -134,10 +137,10 @@ class PlainObj(nn.Module):
 
         pcd_loss = self.pcdloss(transformed_vertices.unsqueeze(0), self.pcd.unsqueeze(0))
         seg_loss = torch.mean(torch.abs(rendered_seg - self.seg) * self.msk[:, :, 0])
+        seg_mask = torch.stack([rendered_seg.detach()] * 3, dim=-1)
+        dpt_loss = torch.mean(torch.square(rendered_depth - self.dpt * seg_mask) * self.msk)
 
-        dpt_loss = torch.mean(torch.square(rendered_depth - self.dpt) * self.msk)
-
-        return pcd_loss, seg_loss, dpt_loss, rendered_seg, rendered_depth
+        return pcd_loss, seg_loss, dpt_loss, rendered_seg, rendered_depth[:, :, 0]
 
 
 class BatchObj(nn.Module):
