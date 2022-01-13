@@ -151,6 +151,18 @@ def vis_depth(depth, output_file, crop_list=None):
     cv2.imwrite(output_file, depth)
 
 
+def vis_model_dpt(depth_path, rendered_depth, output_file, crop_list):
+    rendered_depth = rendered_depth.detach().cpu().numpy() * 1000
+    # np.where(rendered_depth > 1)
+    depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+    depth = depth[crop_list[0]:crop_list[1], crop_list[2]:crop_list[3]]
+    visible_pixels = np.where(depth > 1)
+    all_depth = depth[visible_pixels]
+    dep_max, dep_min = np.max(all_depth), np.min(all_depth)
+    rendered_depth[visible_pixels] -= dep_min
+    rendered_depth = np.array(rendered_depth, dtype=np.float32) * 255
+    rendered_depth /= dep_max - dep_min
+    cv2.imwrite(output_file, rendered_depth)
 
 def showHandJoints(imgInOrg, gtIn, estIn=None, filename=None, upscale=1, lineThickness=3):
     '''

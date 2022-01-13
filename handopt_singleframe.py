@@ -15,7 +15,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--gpu', type=str, default='cuda:0', help='GPU to use [default: GPU 0]')
 FLAGS = parser.parse_args()
 
-DATA_PTH = '/home/jiangche/HOI4D/T1'
+DATA_PTH = '/home/jiangche/HOI4D/T1_old'
+OUTPUT_PTH = '/home/jiangche/HOI4D/output'
 jointsMap = [0,
              13, 14, 15, 16,
              1, 2, 3, 17,
@@ -65,11 +66,26 @@ if __name__ == '__main__':
     #generate point cloud
     depth3d = o3d.geometry.Image(depth2d * large_hand_mask[:, :, 0])
     # load point cloud from depth, NOTE: If scene reconstruction is here, it will be better.
-    intrinsics = o3d.camera.PinholeCameraIntrinsic(1920, 1080, camMat[0,0], camMat[1,1], camMat[0,2], camMat[1,2])
-    pcd = o3d.geometry.PointCloud.create_from_depth_image(depth3d, intrinsics, stride=2)
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(1920, 1080, camMat[0,0], camMat[1,1], camMat[0,2], camMat[1,2])  # 不用/1000?
+    pcd = o3d.geometry.PointCloud.create_from_depth_image(depth3d, intrinsics, stride=2)  # 5693 points
+    voxel_down_pcd = pcd.voxel_down_sample(voxel_size=0.005)  # 1345 points
     # o3d.visualization.draw_geometries([pcd])
+    # o3d.io.write_point_cloud('./pcd.ply', pcd)
+    # o3d.io.write_point_cloud('./voxel_down_pcd.ply', voxel_down_pcd)
     pcd = np.asarray(pcd.points)
+    voxel_down_pcd = np.asarray(voxel_down_pcd.points)
+    random_ids = np.random.randint(0, voxel_down_pcd.shape[0], 778)
+    voxel_down_pcd = voxel_down_pcd[random_ids] # 778 points
 
+    '''
+    # 示例：从相机坐标系(3D坐标)转到像素坐标系(像素坐标)
+    ans = pcd.transpose()
+    ans = np.dot(camMat, ans)
+    ans = ans.transpose()
+    ans1 = (ans[:, 0] / ans[:, 2]).reshape(-1, 1)
+    ans2 = (ans[:, 1] / ans[:, 2]).reshape(-1, 1)
+    print(np.concatenate((ans1, ans2), axis=1))
+    '''
 
     #crop depth 2d
     depth2d_pad = np.pad(depth2d, ((540, 540), (960, 960)))
@@ -84,35 +100,56 @@ if __name__ == '__main__':
 
     cuda_device = FLAGS.gpu
 
+    # model = HandObj(batch_size, ncomps, hand_info['poseCoeff'], hand_info['trans'], beta_fixed, cur_kps2D, cur_vis,
+    #                 hand_mask, obj_mask, depth2d, pcd, camMat, cuda_device, crop_list)
+
+    crop_list = [x1 - int(np.round(camMat[1, 2])) + 960, x2 - int(np.round(camMat[1, 2])) + 960,
+                 y1 - int(np.round(camMat[0, 2])) + 960, y2 - int(np.round(camMat[0, 2])) + 960]
+
     model = HandObj(batch_size, ncomps, hand_info['poseCoeff'], hand_info['trans'], beta_fixed, cur_kps2D, cur_vis,
-                    hand_mask, obj_mask, depth2d, pcd, camMat, cuda_device, crop_list)
+                     hand_mask, obj_mask, depth2d, voxel_down_pcd, camMat, cuda_device, crop_list)
     model.to(cuda_device)
 
     pcd_loss, seg_loss, dpt_loss, kps_loss, cmin_loss, cmax_loss, inv_loss, results = model()
 
     result2D_init = results['2Djoints'].detach().cpu().numpy().astype(np.int32)
-    kpsimg = showHandJoints(color, result2D_init, filename='p12_rendered_kps_init.png')
-    cv2.imwrite('p4_init_rendered_seg.png',
+    
+    kpsimg = showHandJoints(color, result2D_init, filename=os.path.join(OUTPUT_PTH, 'p12_rendered_kps_init.png'))
+
+    cv2.imwrite(os.path.join(OUTPUT_PTH,'p4_init_rendered_seg.png'),
                 ((200 * results['seg']).detach().cpu().numpy()).astype(np.uint8))
 
-    cv2.imwrite('p5_init_rendered_depth.png', (1600 * (results['dep'] -
-                0.85).detach().cpu().numpy()).astype(np.uint8))
+    # cv2.imwrite(os.path.join(OUTPUT_PTH,'p5_init_rendered_depth.png'), (1600 * (results['dep'] -
+    #             0.85).detach().cpu().numpy()).astype(np.uint8))
+    # print(results['dep'].detach().cpu().numpy())
+    # vis_depth(results['dep'].detach().cpu().numpy(),os.path.join(OUTPUT_PTH,'p5_init_rendered_depth.png'))
+    vis_depth(depth2d*1000, os.path.join(OUTPUT_PTH, 'p2_gt_depth.png'))
+
+    assert False
 
     L_pcd = []
     L_seg = []
     L_dpt = []
     L_kps = []
     L_cons = []
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)  # 0.001
 
-    for _ in tqdm(range(1000)):
+    for _ in tqdm(range(0)):
         pcd_loss, seg_loss, dpt_loss, kps_loss, cmin_loss, cmax_loss, inv_loss, _ = model()
-        loss = pcd_loss * 0.01 + seg_loss * 10.0 + dpt_loss * 2.0 + \
+        
+        # 问题：权值设置不合理，各个loss乘上权重之后的数值差异过大
+        '''
+        loss = pcd_loss * 0.01 + seg_loss * 10 + dpt_loss * 2 + \
             kps_loss * 10 + cmin_loss * 5e2 + cmax_loss * 5e2 + inv_loss * 1e3
+        '''
+        # 问题：seg_loss和dpt_loss训练全程数值不变
+        loss = pcd_loss * 0 + seg_loss * 0 + dpt_loss * 0 + \
+            kps_loss * 10 + cmin_loss * 0 + cmax_loss * 0 + inv_loss * 0
+
         # loss = 0.01 10 2 0 5e2 5e2 1e3
         optimizer.zero_grad()
         loss.backward()
-        # print(pcd_loss.item(), seg_loss.item(), dpt_loss.item())
+        print(loss.item(), pcd_loss.item(), seg_loss.item(), dpt_loss.item(), kps_loss.item(), cmin_loss.item(), cmax_loss.item(), inv_loss.item())
         L_pcd.append(pcd_loss.item())
         L_seg.append(seg_loss.item())
         L_dpt.append(dpt_loss.item())
@@ -133,41 +170,45 @@ if __name__ == '__main__':
         'trans': trans
     }
 
-    with open(os.path.join('newhand.pickle'), 'wb') as f:
+    with open(os.path.join(OUTPUT_PTH, 'newhand.pickle'), 'wb') as f:
         pickle.dump(newDict, f)
 
     plt.plot(L_pcd)
-    plt.savefig('p6_L_pcd.png')
+    plt.savefig(os.path.join(OUTPUT_PTH,'p6_L_pcd.png'))
     plt.cla()
 
     plt.plot(L_seg)
-    plt.savefig('p7_L_seg.png')
+    plt.savefig(os.path.join(OUTPUT_PTH, 'p7_L_seg.png'))
     plt.cla()
 
     plt.plot(L_dpt)
-    plt.savefig('p8_L_dpt.png')
+    plt.savefig(os.path.join(OUTPUT_PTH,'p8_L_dpt.png'))
     plt.cla()
 
     plt.plot(L_kps)
-    plt.savefig('p9_L_kps.png')
+    plt.savefig(os.path.join(OUTPUT_PTH,'p9_L_kps.png'))
     plt.cla()
 
     plt.plot(L_cons)
-    plt.savefig('p10_L_cons.png')
+    plt.savefig(os.path.join(OUTPUT_PTH,'p10_L_cons.png'))
 
-    cv2.imwrite('p1_rendered_seg.png', ((
+    cv2.imwrite(os.path.join(OUTPUT_PTH, 'p1_rendered_seg.png'), ((
         200 * results['seg']).detach().cpu().numpy()).astype(np.uint8))
 
-    cv2.imwrite('p2_gt_depth.png', (1600*(depth2d-0.85)).astype(np.uint8))
+    # cv2.imwrite(os.path.join(OUTPUT_PTH,'p2_gt_depth.png'), (1600*(depth2d-0.85)).astype(np.uint8))
+    vis_depth(depth2d, os.path.join(OUTPUT_PTH, 'p2_gt_depth.png'))
 
-    cv2.imwrite('p3_rendered_depth.png', (1600 *
-                (results['dep']-0.85).detach().cpu().numpy()).astype(np.uint8))
+    # cv2.imwrite(os.path.join(OUTPUT_PTH,'p3_rendered_depth.png'), (1600 *
+    #             (results['dep']-0.85).detach().cpu().numpy()).astype(np.uint8))
+    vis_depth(results['dep'].detach().cpu().numpy(),
+              os.path.join(OUTPUT_PTH, 'p3_rendered_depth.png'))
+
 
     result2D = results['2Djoints'].detach().cpu().numpy().astype(np.int32)
     # print(result2D)
 
-    kpsimg = showHandJoints(color, result2D, filename='p11_rendered_kps.png')
+    kpsimg = showHandJoints(color, result2D, filename=os.path.join(OUTPUT_PTH, 'p11_rendered_kps.png'))
     for kps_coord in kps_anno['coord']:
         cv2.circle(kpsimg, center=(int(kps_coord[0]), int(
             kps_coord[1])), radius=3, color=[255, 255, 255], thickness=-1)
-    cv2.imwrite('p12_rendered_kps+gt.png', kpsimg)
+    cv2.imwrite(os.path.join(OUTPUT_PTH, 'p12_rendered_kps+gt.png'), kpsimg)
