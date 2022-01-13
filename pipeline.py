@@ -11,7 +11,7 @@ from loadfile import path_list2plainobj_input
 from interp import get_all_poses_from_0json_path_and_output_log_path
 from interp import get_large_gap_poses_from_0json_path_and_output_log_path
 from model import PlainObj
-from vis import vis2d, vis3d, vis_depth
+from vis import vis2d, vis3d, vis_depth, vis_model_dpt
 
 class ManualBar:
     def __init__(self, max_iter):
@@ -134,6 +134,8 @@ def check_gt_loss_terms_gap10(cuda_device='cuda:0'):
                     all_inter_seg_loss.pop()
                     all_inter_dpt_loss.pop()
                     continue
+                vis_model_dpt(path_list[1], dep, 'depout.jpg', model_input[-1])
+                input()
                 # if pcd_loss.item() - all_inter_pcd_loss[-1] < -50:
                 #     vis2d(dep, seg, path_list[-1], model_input[-1], 'inter.jpg')
                 #     vis2d(dep_gt, seg_gt, path_list[-1], model_input[-1], 'gt.jpg')
@@ -172,6 +174,16 @@ def anna_result_check_gt_loss_terms():
     plt.show()
 
 
+def get_all_path_list():
+    all_list = []
+    new_list = []
+    cnt = 0
+    for path_lists in every_path_generator_from_total_json('total.json'):
+        new_list.append(path_lists)
+        cnt += 1
+        if cnt % 31 == 0:
+            all_list.append(list(new_list.copy()))
+    torch.save(all_list, 'all_list.pt')
 # def check_specific_path_list(path_list):
 #     from vis import vis
 #     from loadfile import read_rt
@@ -180,4 +192,4 @@ def anna_result_check_gt_loss_terms():
 
 
 if __name__ == "__main__":
-    anna_result_check_gt_loss_terms()
+    check_gt_loss_terms_gap10()
