@@ -56,6 +56,11 @@ def vis3d(r, T, rgb_path, depth_path, objfile, cam_in_path, crop_list = None, js
 
 
 def vis2d(model_output_depth, model_output_seg, rgb_path, rgb_crop_list, output_file):
+    '''
+    input:
+        rendered dpt, seg cropped
+        rgb croplist 1920*1080
+    '''
     model_output_depth = model_output_depth.detach().cpu().numpy()
     model_output_seg = model_output_seg.detach().cpu().numpy()
     visible_pixels = np.where(model_output_seg > 0.5)
@@ -187,6 +192,11 @@ def showHandJoints(imgInOrg, gtIn, estIn=None, filename=None, upscale=1, lineThi
     return imgIn
 
 def vis_model_dpt(depth_path, rendered_depth, output_file, crop_list):
+    '''
+    input:
+        rendered dpt, seg cropped
+        croplist 1920*1080
+    '''
     rendered_depth = rendered_depth.detach().cpu().numpy() * 1000
     # np.where(rendered_depth > 1)
     depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)

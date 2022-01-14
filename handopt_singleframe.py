@@ -56,7 +56,7 @@ if __name__ == '__main__':
         else:
             cur_vis[idx] = 0.8
 
-    x1, x2, y1, y2, c12, c02 = read_mask2bbox_hand(mask_pth)
+    x1, x2, y1, y2 = read_mask2bbox_hand(mask_pth)
     crop_list = [x1, x2, y1, y2]  # 1920*1080 square
     # print(crop_list,'croplist')
     obj_mask, hand_mask = read_mask_reverse(mask_pth, dscale=1, crop=crop_list)
@@ -88,8 +88,7 @@ if __name__ == '__main__':
     '''
 
     #crop depth 2d
-    depth2d_pad = np.pad(depth2d, ((540, 540), (960, 960)))
-    depth2d = depth2d_pad[x1+540:x2+540, y1+960:y2+960]
+    depth2d = depth2d[x1:x2,y1:y2]
 
     batch_size = 1
     ncomps = 30
@@ -102,12 +101,12 @@ if __name__ == '__main__':
 
     # model = HandObj(batch_size, ncomps, hand_info['poseCoeff'], hand_info['trans'], beta_fixed, cur_kps2D, cur_vis,
     #                 hand_mask, obj_mask, depth2d, pcd, camMat, cuda_device, crop_list)
-
-    crop_list = [x1 - int(np.round(camMat[1, 2])) + 960, x2 - int(np.round(camMat[1, 2])) + 960,
+    print('crop:',crop_list)
+    crop_list_renderer = [x1 - int(np.round(camMat[1, 2])) + 960, x2 - int(np.round(camMat[1, 2])) + 960,
                  y1 - int(np.round(camMat[0, 2])) + 960, y2 - int(np.round(camMat[0, 2])) + 960]
 
     model = HandObj(batch_size, ncomps, hand_info['poseCoeff'], hand_info['trans'], beta_fixed, cur_kps2D, cur_vis,
-                     hand_mask, obj_mask, depth2d, voxel_down_pcd, camMat, cuda_device, crop_list)
+                     hand_mask, obj_mask, depth2d, voxel_down_pcd, camMat, cuda_device, crop_list_renderer)
     model.to(cuda_device)
 
     pcd_loss, seg_loss, dpt_loss, kps_loss, cmin_loss, cmax_loss, inv_loss, results = model()
@@ -116,16 +115,13 @@ if __name__ == '__main__':
     
     kpsimg = showHandJoints(color, result2D_init, filename=os.path.join(OUTPUT_PTH, 'p12_rendered_kps_init.png'))
 
-    cv2.imwrite(os.path.join(OUTPUT_PTH,'p4_init_rendered_seg.png'),
-                ((200 * results['seg']).detach().cpu().numpy()).astype(np.uint8))
+    vis2d(results['dep'], results['seg'], color2d_pth, crop_list, os.path.join(OUTPUT_PTH, 'p4_init_rendered_seg.png'))
 
     # cv2.imwrite(os.path.join(OUTPUT_PTH,'p5_init_rendered_depth.png'), (1600 * (results['dep'] -
     #             0.85).detach().cpu().numpy()).astype(np.uint8))
     # print(results['dep'].detach().cpu().numpy())
-    # vis_depth(results['dep'].detach().cpu().numpy(),os.path.join(OUTPUT_PTH,'p5_init_rendered_depth.png'))
-    vis_depth(depth2d*1000, os.path.join(OUTPUT_PTH, 'p2_gt_depth.png'))
-
-    assert False
+    vis_model_dpt(depth2d_pth, results['dep'], os.path.join(OUTPUT_PTH,'p5_init_rendered_depth.png'),
+            crop_list)
 
     L_pcd = []
     L_seg = []
@@ -134,17 +130,17 @@ if __name__ == '__main__':
     L_cons = []
     optimizer = optim.Adam(model.parameters(), lr=0.01)  # 0.001
 
-    for _ in tqdm(range(0)):
+    for _ in tqdm(range(1000)):
         pcd_loss, seg_loss, dpt_loss, kps_loss, cmin_loss, cmax_loss, inv_loss, _ = model()
         
         # 问题：权值设置不合理，各个loss乘上权重之后的数值差异过大
-        '''
+        
         loss = pcd_loss * 0.01 + seg_loss * 10 + dpt_loss * 2 + \
             kps_loss * 10 + cmin_loss * 5e2 + cmax_loss * 5e2 + inv_loss * 1e3
-        '''
+        
         # 问题：seg_loss和dpt_loss训练全程数值不变
-        loss = pcd_loss * 0 + seg_loss * 0 + dpt_loss * 0 + \
-            kps_loss * 10 + cmin_loss * 0 + cmax_loss * 0 + inv_loss * 0
+        # loss = pcd_loss * 0 + seg_loss * 0 + dpt_loss * 0 + \
+        #     kps_loss * 10 + cmin_loss * 0 + cmax_loss * 0 + inv_loss * 0
 
         # loss = 0.01 10 2 0 5e2 5e2 1e3
         optimizer.zero_grad()
@@ -192,16 +188,13 @@ if __name__ == '__main__':
     plt.plot(L_cons)
     plt.savefig(os.path.join(OUTPUT_PTH,'p10_L_cons.png'))
 
-    cv2.imwrite(os.path.join(OUTPUT_PTH, 'p1_rendered_seg.png'), ((
-        200 * results['seg']).detach().cpu().numpy()).astype(np.uint8))
+    vis2d(results['dep'], results['seg'], color2d_pth, crop_list,
+          os.path.join(OUTPUT_PTH, 'p1_rendered_seg.png'))
 
-    # cv2.imwrite(os.path.join(OUTPUT_PTH,'p2_gt_depth.png'), (1600*(depth2d-0.85)).astype(np.uint8))
-    vis_depth(depth2d, os.path.join(OUTPUT_PTH, 'p2_gt_depth.png'))
+    vis_depth(depth2d*1000, os.path.join(OUTPUT_PTH, 'p2_gt_depth.png'))
 
-    # cv2.imwrite(os.path.join(OUTPUT_PTH,'p3_rendered_depth.png'), (1600 *
-    #             (results['dep']-0.85).detach().cpu().numpy()).astype(np.uint8))
-    vis_depth(results['dep'].detach().cpu().numpy(),
-              os.path.join(OUTPUT_PTH, 'p3_rendered_depth.png'))
+    vis_model_dpt(depth2d_pth, results['dep'], os.path.join(OUTPUT_PTH, 'p3_rendered_depth.png'),
+                  crop_list)
 
 
     result2D = results['2Djoints'].detach().cpu().numpy().astype(np.int32)

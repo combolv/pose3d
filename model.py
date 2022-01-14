@@ -299,7 +299,7 @@ class HandObj(nn.Module):
     """
 
     def __init__(self, batch_size, ncomps, poseCoeff, trans, beta, kps2d, vis,
-                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920):
+                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920, pca = True):
         super(HandObj, self).__init__()
         self.batch_size = batch_size
         self.theta = nn.Parameter(torch.FloatTensor(
@@ -309,7 +309,7 @@ class HandObj(nn.Module):
         self.trans = nn.Parameter(torch.FloatTensor(trans))
 
         self.mano_layer = ManoLayer(
-            mano_root='manopth/mano/models', use_pca=True, ncomps=ncomps, flat_hand_mean=False)
+            mano_root='manopth/mano/models', use_pca=pca, ncomps=ncomps, flat_hand_mean=False)
         self.pcdloss = EMDLoss()
         print(camMat)
         # print(handpcd.shape)  # (5693, 3)
@@ -377,22 +377,14 @@ class HandObj(nn.Module):
 
         # print(np.where(render_result.detach().cpu().numpy()>0))
         # assert False
-        pad_size = int(round(self.imsize/2))
-        render_result = F.pad(
-            render_result, (pad_size, pad_size, pad_size, pad_size))
         # print(self.crop,'before')
         render_result = render_result.squeeze(0).permute((1, 2, 0))
         # print(render_result.shape, 'result')
-        # print(self.crop, 'after')
-        rendered_depth = render_result[self.crop[0]+pad_size:self.crop[1]+pad_size,
-                                       self.crop[2]+pad_size:self.crop[3]+pad_size, :3]
-        rendered_seg = render_result[self.crop[0]+pad_size:self.crop[1]+pad_size,
-                                     self.crop[2]+pad_size:self.crop[3]+pad_size, 3]
-
-        # print(render_result.shape, 'render result')
-        # print(rendered_seg, 'renderseg')
-        # print(self.seg.shape,'self')
-        # print(self.msk.shape, 'msk')
+        # print(self.crop)
+        rendered_depth = render_result[self.crop[0]:self.crop[1],
+                                       self.crop[2]:self.crop[3], :3]
+        rendered_seg = render_result[self.crop[0]:self.crop[1],
+                                     self.crop[2]:self.crop[3], 3]
 
         constMin, constMax = self.poseConstraint(full_pose[0][3:])
         constMin_loss = torch.norm(constMin)
@@ -400,12 +392,13 @@ class HandObj(nn.Module):
         invalidTheta_loss = torch.norm(
             full_pose[0][self.poseConstraint.invalidThetaIDs])
         
-        print(transformed_verts.contiguous().shape, self.pcd.unsqueeze(0).shape)  # torch.Size([1, 778, 3]), torch.Size([1, 5693, 3])
+        # print(transformed_verts.contiguous().shape, self.pcd.unsqueeze(0).shape)  # torch.Size([1, 778, 3]), torch.Size([1, 5693, 3])
         # 问题：EMD loss要求两个点云的点数相同，这里输入的点数不同！
         pcd_loss = self.pcdloss(
             transformed_verts.contiguous(), self.pcd.unsqueeze(0))
         
         # 问题：seg_loss和dpt_loss无法被训练！
+        # print(rendered_seg.shape, self.seg[:, :, 0].shape , self.msk[:, :, 0].shape)
         seg_loss = torch.mean(
             torch.abs(rendered_seg - self.seg[:, :, 0]) * self.msk[:, :, 0])
         dpt_loss = torch.mean(torch.square(
