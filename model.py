@@ -17,6 +17,7 @@ from vis import *
 
 import soft_renderer.functional as srf
 from emd import EMDLoss
+from chamfer_distance import ChamferDistance
 
 
 class invRodrigues(nn.Module):
@@ -311,6 +312,8 @@ class HandObj(nn.Module):
         self.mano_layer = ManoLayer(
             mano_root='manopth/mano/models', use_pca=pca, ncomps=ncomps, flat_hand_mean=True)
         self.pcdloss = EMDLoss()
+        self.cdloss = ChamferDistance()
+
         # print(camMat)
         # print(handpcd.shape)  # (5693, 3)
         self.cam2pix = projCamera(camMat)
@@ -398,8 +401,15 @@ class HandObj(nn.Module):
         pts_ = np.concatenate((pts_, transformed_joints[0].detach().cpu().numpy()), axis=0)
         p.points = o3d.utility.Vector3dVector(pts_)
         p.paint_uniform_color([0, 0.651, 0.929])
-        print(p.points)
-        o3d.io.write_point_cloud("./ex.ply", p)
+        
+        p_gt = o3d.geometry.PointCloud()
+        pts_gt = self.pcd.reshape(-1, 3).detach().cpu().numpy()
+        p_gt.points = o3d.utility.Vector3dVector(pts_gt)
+        p_gt.paint_uniform_color([0.651, 0.929,0])
+        # print(p.points)
+        # o3d.io.write_point_cloud("./ex.ply", p)
+        p_gt += p
+        o3d.io.write_point_cloud("./ex.ply", p_gt)
 
         # print("projected_faces", projected_faces[0, :, :, :])
         # print("projected_joints", projected_joints)
@@ -470,27 +480,25 @@ class HandObj(nn.Module):
         constMin, constMax = self.poseConstraint(full_pose[0][3:])
         constMin_loss = torch.norm(constMin)
         constMax_loss = torch.norm(constMax)
-        invalidTheta_loss = torch.norm(
-            full_pose[0][self.poseConstraint.invalidThetaIDs])
+        invalidTheta_loss = torch.norm(full_pose[0][self.poseConstraint.invalidThetaIDs])
         
         # print(transformed_verts.contiguous().shape, self.pcd.unsqueeze(0).shape)  # torch.Size([1, 778, 3]), torch.Size([1, 5693, 3])
         # 问题：EMD loss要求两个点云的点数相同，这里输入的点数不同！
-        pcd_loss = self.pcdloss(
-            transformed_verts.contiguous(), self.pcd.unsqueeze(0))
+        pcd_loss = self.pcdloss( transformed_verts.contiguous(), self.pcd.unsqueeze(0) )
         
         # 问题：seg_loss和dpt_loss无法被训练！
-        # print(rendered_seg.shape, self.seg[:, :, 0].shape , self.msk[:, :, 0].shape)
-        # seg_loss = torch.mean(
-        #     torch.abs(rendered_seg - self.seg[:, :, 0]) * self.msk[:, :, 0])
+        print(rendered_seg.shape, self.seg[:, :, 0].shape , self.msk[:, :, 0].shape)
+        # print(np.unique(self.msk.detach().cpu().numpy()))
+        seg_loss = torch.mean(torch.abs(
+            rendered_seg - self.seg[:rendered_seg.shape[0], :rendered_seg.shape[1], 0]) * self.msk[:rendered_seg.shape[0], :rendered_seg.shape[1], 0])
         # dpt_loss = torch.mean(torch.square(
         #     rendered_depth - self.dpt) * self.msk)
-        seg_loss = 0
         dpt_loss = 0
 
         # print(projected_joints, self.kps2d, self.vis)
         # print(projected_joints.shape, self.kps2d.shape, self.vis.shape)
         # print((projected_joints - self.kps2d)*self.vis)
-
+        # print(projected_joints - self.kps2d)
         kps2d_loss = torch.mean(torch.square(
             (projected_joints - self.kps2d) * self.vis))
         # print((projected_joints - self.kps2d)*self.vis)
