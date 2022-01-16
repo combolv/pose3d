@@ -152,3 +152,4 @@ cython_debug/
 #.idea/
 *.ply
 H2Otest.py
+*.png

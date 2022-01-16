@@ -78,7 +78,7 @@ if __name__ == '__main__':
     voxel_down_pcd = voxel_down_pcd[random_ids] # 778 points
 
     '''
-    # 示例：从相机坐标系(3D坐标)转到像素坐标系(像素坐标)
+    # 示例: 从相机坐标系(3D坐标)转到像素坐标系(像素坐标)
     ans = pcd.transpose()
     ans = np.dot(camMat, ans)
     ans = ans.transpose()
