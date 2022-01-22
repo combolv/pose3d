@@ -1,3 +1,4 @@
+from traceback import print_tb
 import torch
 from torch import nn
 from torch import optim
@@ -68,7 +69,6 @@ class projKps(nn.Module):
     x = fx * x / z
     y = - fy * y / z
     """
-
     def __init__(self, camMat):
         super(projKps, self).__init__()
         self.xscale = camMat[0, 0] / 1000
@@ -237,7 +237,7 @@ class Constraints(nn.Module):
 
     def __init__(self, cuda_id):
         super(Constraints, self).__init__()
-        cuda_device = cuda_id
+        self.cuda_device = cuda_id
         self.thetaLimits()
     def thetaLimits(self):
         MINBOUND = -5.
@@ -266,7 +266,7 @@ class Constraints(nn.Module):
                                       MAXBOUND, 0.15, 2.0, -0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # middle
                                       -0.2, 0.15, 1.6, MAXBOUND, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # pinky
                                       -0.4, 0.10, 1.6, -0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # ring
-                                               MAXBOUND, 0.66, 0.5, 1.6, MAXBOUND, 0.5, MAXBOUND, 0, 1.08]).to(cuda_device)  # thumb
+                                               MAXBOUND, 0.66, 0.5, 1.6, MAXBOUND, 0.5, MAXBOUND, 0, 1.08]).to(self.cuda_device)  # thumb
 
         self.fullThetaMat = np.zeros(
             (48, len(self.validThetaIDs)), dtype=np.float32)  # 48x25
@@ -311,7 +311,7 @@ class HandObj(nn.Module):
     """
 
     def __init__(self, batch_size, ncomps, poseCoeff, trans, beta, kps2d, vis,
-                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920):
+                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920, pca = True):
         super(HandObj, self).__init__()
         self.batch_size = batch_size
         self.theta = nn.Parameter(torch.FloatTensor(
@@ -321,10 +321,12 @@ class HandObj(nn.Module):
         self.trans = nn.Parameter(torch.FloatTensor(trans))
 
         self.mano_layer = ManoLayer(
-            mano_root='manopth/mano/models', use_pca=True, ncomps=ncomps, flat_hand_mean=False)
+            mano_root='manopth/mano/models', use_pca=pca, ncomps=ncomps, flat_hand_mean=False)
         self.pcdloss = EMDLoss()
+        print(camMat)
+        # print(handpcd.shape)  # (5693, 3)
         self.cam2pix = projCamera(camMat)
-        self.Kps3Dto2D = projKps(camMat)
+        # self.Kps3Dto2D = projKps(camMat)
         self.poseConstraint = Constraints(gpu)
 
         self.seg = nn.Parameter(torch.FloatTensor(handseg))
@@ -336,7 +338,9 @@ class HandObj(nn.Module):
         self.kps2d = nn.Parameter(torch.FloatTensor(kps2d))
         self.vis = nn.Parameter(torch.FloatTensor(vis))
         self.seg.requires_grad = False
+        self.msk.requires_grad = False
         self.dpt.requires_grad = False
+        self.msk.requires_grad = False
         self.pcd.requires_grad = False
         self.kps2d.requires_grad = False
         self.vis.requires_grad = False
@@ -344,10 +348,20 @@ class HandObj(nn.Module):
 
         self.imsize = size
         self.crop = crop
-        self.center = torch.FloatTensor([960, 540])
+        self.center = nn.Parameter(torch.FloatTensor([960, 540]))
         self.center.requires_grad = False
-        self.camMat = torch.FloatTensor(camMat)
+        self.camMat = nn.Parameter(torch.FloatTensor(camMat))
         self.camMat.requires_grad = False
+    
+    def projKps(self, kps):
+        kps = kps.permute(0, 2, 1)
+        kps = torch.einsum('ik, bkj -> bij', self.camMat, kps)
+        kps = kps.permute(0, 2, 1)
+        ret1 = kps[..., 0] / kps[..., 2]
+        ret2 = kps[..., 1] / kps[..., 2]
+        ret3 = kps[..., 2]
+        ret = torch.stack([ret1, ret2, ret3], dim=-1)
+        return ret
 
     def forward(self):
         hand_verts, hand_joints, full_pose = self.mano_layer(
@@ -363,43 +377,40 @@ class HandObj(nn.Module):
 
         projected_faces = self.cam2pix(transformed_faces)
         projected_faces = projected_faces.unsqueeze(0)
-
-        projected_joints = torch.stack((self.Kps3Dto2D(transformed_joints)[0, :, 0]*self.camMat[0][0]+self.center[0],
-                                        self.Kps3Dto2D(transformed_joints)[0, :, 1]*self.camMat[1][1]+self.center[1]), dim=1)
-
-        # print(transformed_faces.shape)
-        # print(projected_joints)
+        #projected_joints = torch.stack((self.Kps3Dto2D(transformed_joints)[0, :, 0]*self.camMat[0][0]+self.center[0],
+        #                                self.Kps3Dto2D(transformed_joints)[0, :, 1]*self.camMat[1][1]+self.center[1]), dim=1)
+        projected_joints = self.projKps(transformed_joints)[0, :, :2]
 
         depth = torch.stack([projected_faces[..., 2]]*3, dim=-1)
-        # print(depth.shape)
-        # assert False
+
+        
         render_result = srf.soft_rasterize(projected_faces, depth,
                                            self.imsize, texture_type='vertex', near=0.5)
-        pad_size = int(round(self.imsize/2))
-        render_result = F.pad(
-            render_result, (pad_size, pad_size, pad_size, pad_size))
+
+        # print(np.where(render_result.detach().cpu().numpy()>0))
+        # assert False
         # print(self.crop,'before')
         render_result = render_result.squeeze(0).permute((1, 2, 0))
         # print(render_result.shape, 'result')
-        # print(self.crop, 'after')
-        rendered_depth = render_result[self.crop[0]+pad_size:self.crop[1]+pad_size,
-                                       self.crop[2]+pad_size:self.crop[3]+pad_size, :3]
-        rendered_seg = render_result[self.crop[0]+pad_size:self.crop[1]+pad_size,
-                                     self.crop[2]+pad_size:self.crop[3]+pad_size, 3]
-
-        # print(render_result.shape, 'render result')
-        # print(rendered_seg.shape, 'renderseg')
-        # print(self.seg.shape,'self')
-        # print(self.msk.shape, 'msk')
+        # print(self.crop)
+        rendered_depth = render_result[self.crop[0]:self.crop[1],
+                                       self.crop[2]:self.crop[3], :3]
+        rendered_seg = render_result[self.crop[0]:self.crop[1],
+                                     self.crop[2]:self.crop[3], 3]
 
         constMin, constMax = self.poseConstraint(full_pose[0][3:])
         constMin_loss = torch.norm(constMin)
         constMax_loss = torch.norm(constMax)
         invalidTheta_loss = torch.norm(
             full_pose[0][self.poseConstraint.invalidThetaIDs])
-
+        
+        # print(transformed_verts.contiguous().shape, self.pcd.unsqueeze(0).shape)  # torch.Size([1, 778, 3]), torch.Size([1, 5693, 3])
+        # 问题：EMD loss要求两个点云的点数相同，这里输入的点数不同！
         pcd_loss = self.pcdloss(
             transformed_verts.contiguous(), self.pcd.unsqueeze(0))
+        
+        # 问题：seg_loss和dpt_loss无法被训练！
+        # print(rendered_seg.shape, self.seg[:, :, 0].shape , self.msk[:, :, 0].shape)
         seg_loss = torch.mean(
             torch.abs(rendered_seg - self.seg[:, :, 0]) * self.msk[:, :, 0])
         dpt_loss = torch.mean(torch.square(

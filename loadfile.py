@@ -358,8 +358,7 @@ def parse_json(file_pth):  # one hand only
             }
 
 
-def read_mask2bbox_hand(filename, hand_color=2):
-    h, w = 1980, 1080
+def read_mask2bbox_hand(filename, hand_color=2, h=1980,w=1080): #right 2 left 3
     mask = cv2.imread(filename)
     hand_idx = np.where((mask == hand_color).all(axis=2))
     # print(hand_idx)
@@ -372,17 +371,28 @@ def read_mask2bbox_hand(filename, hand_color=2):
 
     x_size = max_x - min_x
     y_size = max_y - min_y
-    crop_max_x = max_x + x_size / 2
-    crop_min_x = min_x - x_size / 2
-    crop_max_y = max_y + y_size / 2
-    crop_min_y = min_y - y_size / 2
+    crop_max_x = min(max_x + x_size / 3, w)
+    crop_min_x = max(min_x - x_size / 3, 0)
+    crop_max_y = min(max_y + y_size / 3, h)
+    crop_min_y = max(min_y - y_size / 3, 0)
     crop_y_size = crop_max_y - crop_min_y
     crop_x_size = crop_max_x - crop_min_x
     if crop_x_size > crop_y_size:  # y size expand
-        crop_max_y = crop_min_y + crop_x_size
+        if crop_max_y + crop_x_size - crop_y_size > h:
+            crop_min_y = crop_max_y - crop_x_size
+        else:
+            crop_max_y = crop_min_y + crop_x_size
     else:  # crop_y_size > crop_x_size, x size expand
-        crop_max_x = crop_min_x + crop_y_size
-    return int(crop_min_x), int(crop_max_x), int(crop_min_y), int(crop_max_y), int(-crop_min_x), int(-crop_min_y)
+        if crop_max_x + crop_y_size - crop_x_size > h:
+            crop_min_x = crop_max_x - crop_y_size
+        else:
+            crop_max_x = crop_min_x + crop_y_size
+            if crop_max_x > w:
+                crop_min_x -= crop_max_x - w
+                crop_max_x -= crop_max_x - w
+    x1, x2, y1, y2 = round(crop_min_x * 1.5)+1, round(crop_max_x * 1.5) - \
+        1, round(crop_min_y * 1.5)+1, round(crop_max_y * 1.5)-1
+    return int(crop_min_x), int(crop_max_x), int(crop_min_y), int(crop_max_y)
 
 
 def read_mask_reverse(file, hand_color=2, obj_color=1, dscale=10, crop=(0, 1080, 0, 1920)):
@@ -390,9 +400,8 @@ def read_mask_reverse(file, hand_color=2, obj_color=1, dscale=10, crop=(0, 1080,
     h, w = int(round((crop[3]-crop[2]) / dscale)
                ), int(round((crop[1]-crop[0]) / dscale))
     mask = cv2.imread(file)
-    mask = cv2.resize(mask, (1920, 1080), interpolation=cv2.INTER_NEAREST)
-    mask_pad = np.pad(mask, ((540, 540), (960, 960), (0, 0)))
-    mask = mask_pad[crop[0]+540:crop[1]+540, crop[2]+960:crop[3]+960, :]
+    # mask = cv2.resize(mask, (1920, 1080), interpolation=cv2.INTER_NEAREST)
+    mask = mask[crop[0]:crop[1], crop[2]:crop[3], :]
     # print(mask.shape)
 
     # [crop[0]:crop[1], crop[2]:crop[3], :]
