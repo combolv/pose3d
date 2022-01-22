@@ -212,12 +212,5 @@ def vis_model_dpt(depth_path, rendered_depth, output_file, crop_list):
     rendered_depth /= dep_max - dep_min
     cv2.imwrite(output_file, rendered_depth)
 
-def vis_figure_as_figures(model_output, type="seg"):
-    if type == "seg":
-        output_seg = model_output.detach().cpu().numpy()
-        s, _ = output_seg.shape
-        for i in range(s):
-            for j in range(s):
-                print(int(5 * output_seg[i][j]), end=' ')
-            print(' ')
+
 
