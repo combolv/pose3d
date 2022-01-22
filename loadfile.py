@@ -6,6 +6,12 @@ import cv2
 import open3d as o3d
 import pickle
 
+def crop3d(dim, scaling, pcd):
+    edge = dim / 2 * scaling
+    valid_test = np.all(-edge < pcd, axis=-1) & np.all(pcd < edge, axis=-1)
+    return pcd[np.where(valid_test)]
+
+
 def get_color_map(N=256):
     def bitget(byteval, idx):
         return ((byteval & (1 << idx)) != 0)
@@ -41,6 +47,8 @@ def read_anno2objpath(file):
     except:
         return ''
     if labels not in mapping_dict:
+        print(file, labels)
+        input()
         return ''
     N_idx = file.index('N')
     try:
@@ -49,7 +57,6 @@ def read_anno2objpath(file):
         num = int(file[N_idx+1])
 
     out_file_name = mapping_dict[labels] + str(num).zfill(3) + '.obj'
-
     if os.path.exists(out_file_name):
         return out_file_name
     else:
@@ -99,16 +106,18 @@ def read_rtd(file, num=0):
 
 def read_mask2bbox(filename, obj_color=1, denoise=True):
     h, w = 1280, 720
-    if os.path.exists('/mnt/8T/kangbo' + filename):
-        mask = cv2.imread('/mnt/8T/kangbo' + filename)
+    # print('/mnt/8T/kangbo' + filename, os.path.exists('/mnt/8T/kangbo' + filename))
+    if os.path.exists('/mnt/8T/HOI4D_clean_mask' + filename):
+        mask = cv2.imread('/mnt/8T/HOI4D_clean_mask' + filename)
         new_path, denoise = None, False
     elif denoise:
-        new_path = '/mnt/8T/kangbo' + os.path.dirname(filename)
+        new_path = '/mnt/8T/HOI4D_clean_mask' + os.path.dirname(filename)
         if not os.path.exists(new_path):
             os.makedirs(new_path)
         mask = cv2.imread(filename)
     else:
         mask = cv2.imread(filename)
+    # print("denoise", denoise)
     dx = [-1, -1, -1, 0, 0, 1, 1, 1]
     dy = [-1, 0, 1, 1, -1, -1, 0, 1]
     clean_mask = np.zeros_like(mask)
@@ -117,16 +126,18 @@ def read_mask2bbox(filename, obj_color=1, denoise=True):
             for j in range(h):
                 cnt = 0
                 val = 0
+                flag_no_black_edge = True
                 for num in range(8):
                     try:
+                        flag_no_black_edge = flag_no_black_edge and (mask[i + dx[num]][j + dy[num]] != [0, 0, 0]).any()
                         cnt += 1 if (mask[i][j][1] == mask[i+dx[num]][j+dy[num]][1] and
                                      mask[i][j][2] == mask[i+dx[num]][j+dy[num]][2]) else 0
                         val += 1
                     except IndexError:
                         continue
-                if cnt / val > 0.5:
+                if cnt / val > 0.5 or flag_no_black_edge:
                     clean_mask[i][j] = mask[i][j]
-        cv2.imwrite('/mnt/8T/kangbo' + filename, clean_mask)
+        cv2.imwrite('/mnt/8T/HOI4D_clean_mask' + filename, clean_mask)
     else:
         clean_mask = mask.copy()
 
@@ -255,8 +266,12 @@ def annoed_path_generator_from_total_json(total_path):
         yield all_ret_list
 
 
-def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_path, *args):
+def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_path, out_src_rot=None, outsrc_trans=None):
     rot, trans, dim = read_rtd(anno_path)
+    if out_src_rot is not None:
+        rot = out_src_rot
+    if outsrc_trans is not None:
+        trans = outsrc_trans
     vertices, triangles = read_CAD_model(CAD_path, dim)
     depth2d = cv2.imread(dpt_path, cv2.IMREAD_UNCHANGED)
     camMat = np.load(cam_in_path)
@@ -273,8 +288,20 @@ def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_pa
     # load point cloud from depth
     intrinsics = o3d.camera.PinholeCameraIntrinsic(1920, 1080, camMat[0, 0], camMat[1, 1], camMat[0, 2], camMat[1, 2])
     pcd = o3d.geometry.PointCloud.create_from_depth_image(depth3d, intrinsics, stride=2)
-
     pcd = np.asarray(pcd.points)
+
+    rot_matrix = Rt.from_rotvec(rot).as_matrix()
+    pcd = pcd @ rot_matrix - rot_matrix.T @ trans
+    pcd = crop3d(dim, 2, pcd)
+    pcd = pcd @ rot_matrix.T + trans
+
+    if len(pcd) < 100:
+        pcd_show1 = o3d.utility.Vector3dVector(org_pcd)
+        box = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=dim)
+        box2 = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=2 * dim)
+        pcd_show2 = o3d.utility.Vector3dVector(pcd)
+        o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show1), box])
+        o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show2), box2])
 
     return [rot, trans, vertices, triangles, obj_mask, hand_mask, depth2d, pcd, camMat, crop_list]
 

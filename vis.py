@@ -56,6 +56,8 @@ def vis3d(r, T, rgb_path, depth_path, objfile, cam_in_path, crop_list = None, js
 
 
 def vis2d(model_output_depth, model_output_seg, rgb_path, rgb_crop_list, output_file):
+    if not os.path.exists(os.path.dirname(output_file)):
+        os.makedirs(os.path.dirname(output_file))
     model_output_depth = model_output_depth.detach().cpu().numpy()
     model_output_seg = model_output_seg.detach().cpu().numpy()
     visible_pixels = np.where(model_output_seg > 0.5)
@@ -198,4 +200,13 @@ def vis_model_dpt(depth_path, rendered_depth, output_file, crop_list):
     rendered_depth = np.array(rendered_depth, dtype=np.float32) * 255
     rendered_depth /= dep_max - dep_min
     cv2.imwrite(output_file, rendered_depth)
+
+def vis_figure_as_figures(model_output, type="seg"):
+    if type == "seg":
+        output_seg = model_output.detach().cpu().numpy()
+        s, _ = output_seg.shape
+        for i in range(s):
+            for j in range(s):
+                print(int(5 * output_seg[i][j]), end=' ')
+            print(' ')
 
