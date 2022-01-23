@@ -153,3 +153,4 @@ cython_debug/
 *.ply
 H2Otest.py
 *.png
+*.out
