@@ -1,3 +1,4 @@
+from operator import gt
 from traceback import print_tb
 import torch
 from torch import nn
@@ -19,6 +20,9 @@ from vis import *
 # from emd import EMDLoss
 from chamfer_distance import ChamferDistance
 import soft_renderer.functional as srf
+from emd import EMDLoss
+from chamfer_distance import ChamferDistance
+
 
 class invRodrigues(nn.Module):
     """
@@ -324,7 +328,7 @@ class HandObj(nn.Module):
     """
 
     def __init__(self, batch_size, ncomps, poseCoeff, trans, beta, kps2d, vis,
-                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920, pca = True):
+                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920, w=1920, h=1080, pca = True, flat_bool=True):
         super(HandObj, self).__init__()
         self.batch_size = batch_size
         self.theta = nn.Parameter(torch.FloatTensor(
@@ -334,9 +338,11 @@ class HandObj(nn.Module):
         self.trans = nn.Parameter(torch.FloatTensor(trans))
 
         self.mano_layer = ManoLayer(
-            mano_root='manopth/mano/models', use_pca=pca, ncomps=ncomps, flat_hand_mean=False)
+            mano_root='manopth/mano/models', use_pca=pca, ncomps=ncomps, flat_hand_mean=flat_bool)
         self.pcdloss = EMDLoss()
-        print(camMat)
+        self.cdloss = ChamferDistance()
+
+        # print(camMat)
         # print(handpcd.shape)  # (5693, 3)
         self.cam2pix = projCamera(camMat)
         # self.Kps3Dto2D = projKps(camMat)
@@ -344,8 +350,7 @@ class HandObj(nn.Module):
 
         self.seg = nn.Parameter(torch.FloatTensor(handseg))
 
-        self.dpt = nn.Parameter(torch.stack(
-            [torch.FloatTensor(handdpt)]*3, dim=-1))
+        self.dpt = nn.Parameter(torch.FloatTensor(handdpt))
         self.msk = nn.Parameter(torch.FloatTensor(objmask))
         self.pcd = nn.Parameter(torch.FloatTensor(handpcd))
         self.kps2d = nn.Parameter(torch.FloatTensor(kps2d))
@@ -357,16 +362,37 @@ class HandObj(nn.Module):
         self.pcd.requires_grad = False
         self.kps2d.requires_grad = False
         self.vis.requires_grad = False
-        self.beta.requires_grad = False
+        # self.beta.requires_grad = False
 
         self.imsize = size
+        self.w = w
+        self.h = h
         self.crop = crop
-        self.center = nn.Parameter(torch.FloatTensor([960, 540]))
+        self.center = nn.Parameter(torch.FloatTensor([h//2, w//2]))
         self.center.requires_grad = False
         self.camMat = nn.Parameter(torch.FloatTensor(camMat))
         self.camMat.requires_grad = False
     
+    def projCamera(self, mesh):
+        mesh = mesh.permute(0, 2, 1)
+        mesh = torch.einsum('ik, bkj -> bij', self.camMat, mesh)
+        mesh = mesh.permute(0, 2, 1)
+        ret1 = mesh[..., 0] / mesh[..., 2]
+        ret2 = mesh[..., 1] / mesh[..., 2]
+        ret3 = mesh[..., 2]
+        ret = torch.stack([ret1, ret2, ret3], dim=-1)
+        return ret
+    
     def projKps(self, kps):
+        '''
+        # 示例: 从相机坐标系(3D坐标)转到像素坐标系(像素坐标)
+        ans = pcd.transpose()
+        ans = np.dot(camMat, ans)
+        ans = ans.transpose()
+        ans1 = (ans[:, 0] / ans[:, 2]).reshape(-1, 1)
+        ans2 = (ans[:, 1] / ans[:, 2]).reshape(-1, 1)
+        print(np.concatenate((ans1, ans2), axis=1))
+        '''
         kps = kps.permute(0, 2, 1)
         kps = torch.einsum('ik, bkj -> bij', self.camMat, kps)
         kps = kps.permute(0, 2, 1)
@@ -375,74 +401,209 @@ class HandObj(nn.Module):
         ret3 = kps[..., 2]
         ret = torch.stack([ret1, ret2, ret3], dim=-1)
         return ret
+    
+    def cal_seg_loss(self,rendered_seg, gt_seg):
+        assert rendered_seg.shape == gt_seg.shape, 'shape should be the same'
+        return 1 - torch.sum(rendered_seg * gt_seg) / torch.sum(rendered_seg + gt_seg - rendered_seg * gt_seg)
+
 
     def forward(self):
-        hand_verts, hand_joints, full_pose = self.mano_layer(
-            self.theta, self.beta)
+        hand_verts, hand_joints, full_pose = self.mano_layer(self.theta, self.beta)
+
         # hand_fullpose = self.mano_layer.th_comps
         hand_faces_index = self.mano_layer.th_faces.detach().cpu().numpy()
-        hand_faces = hand_verts[0, hand_faces_index]  # !!
+        hand_faces = hand_verts[0, hand_faces_index]
         # print(hand_faces_index.shape)
         # print(hand_faces.shape)
-        transformed_verts = hand_verts/1000.0 + self.trans
-        transformed_joints = hand_joints/1000.0 + self.trans
-        transformed_faces = hand_faces/1000.0 + self.trans
+        transformed_verts = hand_verts/1000.0 + self.trans  # torch.Size([1, 778, 3])
+        transformed_joints = hand_joints/1000.0 + self.trans  # torch.Size([1, 21, 3])
+        transformed_faces = hand_faces/1000.0 + self.trans  # torch.Size([1538, 3, 3])
 
-        projected_faces = self.cam2pix(transformed_faces)
-        projected_faces = projected_faces.unsqueeze(0)
-        #projected_joints = torch.stack((self.Kps3Dto2D(transformed_joints)[0, :, 0]*self.camMat[0][0]+self.center[0],
+
+        # projected_faces = self.cam2pix(transformed_faces)
+        projected_faces = self.projCamera(transformed_faces)
+        projected_faces = projected_faces.unsqueeze(0)  # 像素系mesh各点的像素坐标+深度值
+        # projected_joints = torch.stack((self.Kps3Dto2D(transformed_joints)[0, :, 0]*self.camMat[0][0]+self.center[0],
         #                                self.Kps3Dto2D(transformed_joints)[0, :, 1]*self.camMat[1][1]+self.center[1]), dim=1)
-        projected_joints = self.projKps(transformed_joints)[0, :, :2]
+        projected_joints = self.projKps(transformed_joints)[0, :, :2]  # 像素系21个关键点的坐标
+        
+        
+        # 可视化
+        p = o3d.geometry.PointCloud()
+        pts_ = transformed_faces.reshape(-1, 3).detach().cpu().numpy()
+        pts_ = np.concatenate((pts_, transformed_joints[0].detach().cpu().numpy()), axis=0)
+        p.points = o3d.utility.Vector3dVector(pts_)
+        p.paint_uniform_color([0, 0.651, 0.929])
+        
+        p_gt = o3d.geometry.PointCloud()
+        pts_gt = self.pcd.reshape(-1, 3).detach().cpu().numpy()
+        p_gt.points = o3d.utility.Vector3dVector(pts_gt)
+        p_gt.paint_uniform_color([0.651, 0.929,0])
+        # print(p.points)
+        # o3d.io.write_point_cloud("./ex.ply", p)
+        p_gt += p
+        # o3d.io.write_point_cloud("./ex.ply", p_gt)
+        
+        
+
+        # print("projected_faces", projected_faces[0, :, :, :])
+        # print("projected_joints", projected_joints)
+        '''
+        img = cv2.imread("/home/jiangche/HOI4D/subject2_h1_0/align_image/000299.png")
+        for i in range(projected_faces.shape[1]):
+            for j in range(projected_faces.shape[2]):
+                cv2.circle(img, center=(int(projected_faces[0, i, j, 0]), int(projected_faces[0, i, j, 1])), radius=1, color=[0, 255, 0], thickness=-1)
+        for i in range(projected_faces.shape[1]):
+            x0 = int(projected_faces[0, i, 0, 0])
+            y0 = int(projected_faces[0, i, 0, 1])
+            x1 = int(projected_faces[0, i, 1, 0])
+            y1 = int(projected_faces[0, i, 1, 1])
+            x2 = int(projected_faces[0, i, 1, 0])
+            y2 = int(projected_faces[0, i, 1, 1])
+            cv2.line(img, (x0, y0), (x1, y1), (0, 0, 255))
+            cv2.line(img, (x1, y1), (x2, y2), (0, 0, 255))
+            cv2.line(img, (x2, y2), (x0, y0), (0, 0, 255))
+        for i in range(projected_joints.shape[0]):
+            cv2.circle(img, center=(int(projected_joints[i, 0]), int(projected_joints[i, 1])), radius=3, color=[255, 255, 255], thickness=-1)
+        cv2.imwrite("./ex.png", img)
+        print("visualization ok!")
+        '''
 
         depth = torch.stack([projected_faces[..., 2]]*3, dim=-1)
+        
+        #render_result = srf.soft_rasterize(projected_faces, depth,
+        #                                   self.imsize, texture_type='vertex', near=0.5)
+        
+        # assert int(self.camMat[0, 0]) == int(self.camMat[1, 1])  # 要求srf.soft_rasterize输入的图像是正方形
+        assert self.camMat[0, 0] > self.camMat[0, 2]
+        assert self.camMat[0, 0] > self.camMat[1, 2]
+        alpha = 1  # alpha是整数，其设置理论上不改变render结果，只是为了防止render的图片分辨率不够大，但现在结果随着alpha的增大变“胖”, 是由于SoftRas一些默认参数导致的
+        f = int(self.camMat[0, 0]) * alpha
+        input_faces = transformed_faces.clone()
+        input_faces[..., 0] = transformed_faces[..., 0] / transformed_faces[..., 2] / alpha
+        input_faces[..., 1] = - transformed_faces[..., 1] / transformed_faces[..., 2] / alpha * self.camMat[1, 1] / self.camMat[0, 0]
+        '''
+        # change the depth scale to [1, 100]
+        depth_mn = input_faces[:, :, 2].min()
+        depth_mx = input_faces[:, :, 2].max()
+        print(depth_mn, depth_mx)
+        input_faces[:, :, 2] = (input_faces[:, :, 2] - depth_mn) / (depth_mx - depth_mn) * (100 - 1) + 1
+        print(input_faces)
+        '''
+        '''
+        wr = open("./debug_ex1.out", "w")
+        for i in range(depth.shape[1]):
+            for j in range(depth.shape[2]):
+                wr.write("{} ".format(str(depth[0, i, j, 0])))
+            wr.write("\n")
+        wr.close()
+        # depth[:, :, :, :] = 0.5
+        '''
+        # background_color = [0, 0, 0]
+        render_result = srf.soft_rasterize(input_faces.unsqueeze(0), depth,
+                                           f * 2, background_color=[0, 0, 0], texture_type='vertex', near=0.1, far=101, sigma_val=1e-5, gamma_val=1e-5, eps=1e-4, dist_eps=1e-5)
+        
+
+        render_result = render_result.squeeze(0).permute((1, 2, 0))
+        start_idx = f - int(self.camMat[0, 2])
+        start_idy = f - int(self.camMat[1, 2])
+
+        rendered_depth = render_result[start_idy: start_idy + self.h, start_idx: start_idx + self.w, 0]
+        rendered_seg = render_result[start_idy: start_idy + self.h, start_idx: start_idx + self.w, 3]
 
         
-        render_result = srf.soft_rasterize(projected_faces, depth,
-                                           self.imsize, texture_type='vertex', near=0.5)
+        # 可视化
+        dep = render_result[start_idy: start_idy + self.h, start_idx: start_idx + self.w].detach().cpu().numpy()
+        alpha = dep[:, :, 3]
+        image = (255 * dep).astype(np.uint8)
+        #print(dep[0, 0], dep[550, 858], dep[509, 863], dep[566, 792])
+        img = image[:, :, :3]
+        img[alpha < 0.5] = 0
+        cv2.imwrite("./ex1.png", image[:, :, :3])
+        p = o3d.geometry.PointCloud()
+        pts_depth_ = dep[alpha > 0.5][:, 0]
+        pts_y_, pts_x_ = np.where(alpha > 0.5)
+        pts_ = np.stack((pts_x_ * pts_depth_, pts_y_ * pts_depth_, pts_depth_), axis=1)
+        camMat = self.camMat.detach().cpu().numpy()
+        pts_ = np.dot(np.linalg.inv(camMat), pts_.transpose()).transpose()
+        # print("pts_", pts_.shape, pts_)
+        p.points = o3d.utility.Vector3dVector(pts_)
+        p.paint_uniform_color([0.651, 0, 0.929])
+        p_gt += p
+        # o3d.io.write_point_cloud("./ex.ply", p_gt)
+        
 
-        # print(np.where(render_result.detach().cpu().numpy()>0))
-        # assert False
-        # print(self.crop,'before')
-        render_result = render_result.squeeze(0).permute((1, 2, 0))
-        # print(render_result.shape, 'result')
-        # print(self.crop)
-        rendered_depth = render_result[self.crop[0]:self.crop[1],
-                                       self.crop[2]:self.crop[3], :3]
-        rendered_seg = render_result[self.crop[0]:self.crop[1],
-                                     self.crop[2]:self.crop[3], 3]
+        max_idx = min(2*f-1, self.w)
+        max_idy = min(2*f-1, self.h)
+
+        # 不训练
+        # results = {
+        #     'seg': rendered_seg,
+        #     'dep': rendered_depth,
+        #     '2Djoints': projected_joints
+        # }
+        # return 0, 0, 0, 0, 0, 0, 0, results
+        
+
 
         constMin, constMax = self.poseConstraint(full_pose[0][3:])
         constMin_loss = torch.norm(constMin)
         constMax_loss = torch.norm(constMax)
-        invalidTheta_loss = torch.norm(
-            full_pose[0][self.poseConstraint.invalidThetaIDs])
+        invalidTheta_loss = torch.norm(full_pose[0][self.poseConstraint.invalidThetaIDs])
         
         # print(transformed_verts.contiguous().shape, self.pcd.unsqueeze(0).shape)  # torch.Size([1, 778, 3]), torch.Size([1, 5693, 3])
         # 问题：EMD loss要求两个点云的点数相同，这里输入的点数不同！
-        pcd_loss = self.pcdloss(
-            transformed_verts.contiguous(), self.pcd.unsqueeze(0))
+        pcd_loss = self.pcdloss( transformed_verts.contiguous(), self.pcd.unsqueeze(0) )
+        # dist1, dist2, _, _ = self.cdloss(transformed_verts.contiguous(), self.pcd.unsqueeze(0))
+
+
+        # pcd_loss = torch.mean(dist2)
+        # print(transformed_verts.contiguous().shape, self.pcd.unsqueeze(0).shape)
+        # exit(0)
         
         # 问题：seg_loss和dpt_loss无法被训练！
-        # print(rendered_seg.shape, self.seg[:, :, 0].shape , self.msk[:, :, 0].shape)
-        seg_loss = torch.mean(
-            torch.abs(rendered_seg - self.seg[:, :, 0]) * self.msk[:, :, 0])
-        dpt_loss = torch.mean(torch.square(
-            rendered_depth - self.dpt) * self.msk)
+        # print(np.unique(self.msk.detach().cpu().numpy()))
+        # print(rendered_seg.shape, self.seg.shape, self.msk.shape)
+
+        rendered_seg_clip = (rendered_seg > 0.5).int()
+        
+        img = (rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]) * self.msk[:max_idy, :max_idx, 0]
+        # img = rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]
+        img = (255*img.detach().cpu().numpy()).astype(np.uint8)
+        cv2.imwrite("./ex2.png", img)
+        
+
+        # seg_loss = torch.mean(torch.abs(rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]) * self.msk[:max_idy, :max_idx, 0])
+        seg_loss = self.cal_seg_loss(rendered_seg* self.msk[:max_idy, :max_idx, 0], self.seg[:max_idy, :max_idx, 0])
+        # dpt_loss = torch.mean(torch.abs(rendered_depth ))
+        # seg_loss = 0
+        # dpt_loss = torch.mean(torch.abs(
+        #     rendered_depth - self.dpt[:max_idy, :max_idx]) * self.dpt[:max_idy, :max_idx])
+        r_depth = rendered_depth[:max_idy, :max_idx]
+        gt_depth = self.dpt[:max_idy, :max_idx]
+        valid_flag = (rendered_seg > 0.5) & (gt_depth > 0)
+        r_depth_valid = r_depth[valid_flag]
+        gt_depth_valid = gt_depth[valid_flag]
+        dpt_loss = torch.mean(torch.abs(r_depth_valid - gt_depth_valid))
 
         # print(projected_joints, self.kps2d, self.vis)
         # print(projected_joints.shape, self.kps2d.shape, self.vis.shape)
         # print((projected_joints - self.kps2d)*self.vis)
-
+        # print(projected_joints - self.kps2d)
         kps2d_loss = torch.mean(torch.square(
             (projected_joints - self.kps2d) * self.vis))
         # print((projected_joints - self.kps2d)*self.vis)
+        
+        wrist_depth_loss = torch.abs(gt_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()] - r_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()]) \
+            * (gt_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()] > 0)
 
         results = {
             'seg': rendered_seg,
             'dep': rendered_depth,
-            '2Djoints': projected_joints
+            '2Djoints': projected_joints,
+            'pointcloud': p_gt
         }
 
         return pcd_loss, seg_loss, dpt_loss, kps2d_loss, constMin_loss, constMax_loss, \
-            invalidTheta_loss, results
+            invalidTheta_loss, wrist_depth_loss, results
 

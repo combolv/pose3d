@@ -461,12 +461,67 @@ def read_mask2bbox_hand(filename, hand_color=2, h=1980,w=1080): #right 2 left 3
         1, round(crop_min_y * 1.5)+1, round(crop_max_y * 1.5)-1
     return int(crop_min_x), int(crop_max_x), int(crop_min_y), int(crop_max_y)
 
+def read_mask2bbox_H2O(filename, hand_color=2, h=1980,w=1080): #right 2 left 3
+    mask = read_raw_seg(filename, h,w)
+    hand_idx = np.where((mask == hand_color).all(axis=2))
+    # print(hand_idx)
+    # newmask = np.zeros((1080,1920,3))
+    # newmask[hand_idx] = [255,0,0]
+    # cv2.imwrite('mask.png', newmask)
+    min_x, max_x = np.min(hand_idx[0]), np.max(hand_idx[0])
+    min_y, max_y = np.min(hand_idx[1]), np.max(hand_idx[1])
+    # print(min_x, max_x, min_y, max_y)
+
+    x_size = max_x - min_x
+    y_size = max_y - min_y
+    crop_max_x = min(max_x + x_size / 3, w)
+    crop_min_x = max(min_x - x_size / 3, 0)
+    crop_max_y = min(max_y + y_size / 3, h)
+    crop_min_y = max(min_y - y_size / 3, 0)
+    crop_y_size = crop_max_y - crop_min_y
+    crop_x_size = crop_max_x - crop_min_x
+    if crop_x_size > crop_y_size:  # y size expand
+        if crop_max_y + crop_x_size - crop_y_size > h:
+            crop_min_y = crop_max_y - crop_x_size
+        else:
+            crop_max_y = crop_min_y + crop_x_size
+    else:  # crop_y_size > crop_x_size, x size expand
+        if crop_max_x + crop_y_size - crop_x_size > h:
+            crop_min_x = crop_max_x - crop_y_size
+        else:
+            crop_max_x = crop_min_x + crop_y_size
+            if crop_max_x > w:
+                crop_min_x -= crop_max_x - w
+                crop_max_x -= crop_max_x - w
+    x1, x2, y1, y2 = round(crop_min_x * 1.5)+1, round(crop_max_x * 1.5) - \
+        1, round(crop_min_y * 1.5)+1, round(crop_max_y * 1.5)-1
+    return int(crop_min_x), int(crop_max_x), int(crop_min_y), int(crop_max_y)
+
 
 def read_mask_reverse(file, hand_color=2, obj_color=1, dscale=10, crop=(0, 1080, 0, 1920)):
     color_map = get_color_map()
     h, w = int(round((crop[3]-crop[2]) / dscale)
                ), int(round((crop[1]-crop[0]) / dscale))
     mask = cv2.imread(file)
+    # mask = cv2.resize(mask, (1920, 1080), interpolation=cv2.INTER_NEAREST)
+    mask = mask[crop[0]:crop[1], crop[2]:crop[3], :]
+    # print(mask.shape)
+
+    # [crop[0]:crop[1], crop[2]:crop[3], :]
+
+    hand_idx = np.where((mask == hand_color).all(axis=2))
+    obj_idx = np.where((mask == obj_color).all(axis=2))
+    hand_mask = np.zeros((w, h, 3), dtype=np.float32)
+    obj_mask = np.ones((w, h, 3), dtype=np.float32)
+    obj_mask[obj_idx] = [0, 0, 0]
+    hand_mask[hand_idx] = [1, 1, 1]
+    return obj_mask, hand_mask
+
+
+def read_mask_reverse_H2O(file, hand_color=2, obj_color=1, dscale=10, crop=(0, 1080, 0, 1920),h=1920,w=1080):
+    h, w = int(round((crop[3]-crop[2]) / dscale)
+               ), int(round((crop[1]-crop[0]) / dscale))
+    mask = read_raw_seg(file,h,w)
     # mask = cv2.resize(mask, (1920, 1080), interpolation=cv2.INTER_NEAREST)
     mask = mask[crop[0]:crop[1], crop[2]:crop[3], :]
     # print(mask.shape)
@@ -490,6 +545,26 @@ def loadPickleData(fName):
             pickData = pickle.load(f)
 
     return pickData
+
+
+
+def read_raw_seg(maskfilepth, h=1920, w=1080):  # right 2 left 3
+    color_map = get_color_map()
+    mask = cv2.imread(maskfilepth)
+    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
+    mask = cv2.resize(mask, (h, w))
+    new_mask = np.zeros(mask.shape)
+    hand_idx_left = np.where((mask == color_map[2]).all(axis=2))
+    hand_idx_right = np.where((mask == color_map[3]).all(axis=2))
+
+    new_mask[hand_idx_left] = [3, 3, 3]
+    new_mask[hand_idx_right] = [2, 2, 2]
+    mask[hand_idx_left] = 255
+
+    # maskrawpth = join(saveRawSegDir, i+'.png')
+    # print(new_mask.shape)
+    # cv2.imwrite(maskrawpth, new_mask)
+    return new_mask
 
 if __name__ == "__main__":
     # test()
