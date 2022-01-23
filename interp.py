@@ -50,7 +50,8 @@ def get_all_poses_from_0json_path_and_output_log_path(json_path, out_path):
     json_folder = Pt.dirname(json_path)
     zlen = len(json_path) - len(json_folder) - 6
     outCam = o3d.io.read_pinhole_camera_trajectory(out_path).parameters
-    assert len(outCam) == 300
+    if len(outCam) != 300:
+        return None, None
     to_inter = {'rot':[], 'trans':[]}
     all_rots, all_transis = [], []
     for frame_id in range(0, 301, 10):
@@ -68,7 +69,7 @@ def get_all_poses_from_0json_path_and_output_log_path(json_path, out_path):
     to_inter['rot'] = np.array(to_inter['rot'])
     to_inter['trans'] = np.array(to_inter['trans'])
     rot_matrix, transis = interpolate(to_inter)
-    for frame_id in range(299):
+    for frame_id in range(300):
         rot, trans = world2cam(rot_matrix[frame_id], transis[frame_id], outCam[frame_id].extrinsic)
         all_rots.append(rot)
         all_transis.append(trans)
