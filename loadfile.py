@@ -143,6 +143,9 @@ def read_mask2bbox(filename, obj_color=1, denoise=True):
 
     color_map = get_color_map()
     obj_idx = np.where((clean_mask == color_map[obj_color][::-1]).all(axis=2))
+    if obj_color == 3:
+        obj_base_idx = np.where((clean_mask == color_map[1][::-1]).all(axis=2))
+        obj_idx = obj_idx + obj_base_idx
     min_x, max_x = np.min(obj_idx[0]), np.max(obj_idx[0])
     min_y, max_y = np.min(obj_idx[1]), np.max(obj_idx[1])
     x_size = max_x - min_x
@@ -295,15 +298,79 @@ def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_pa
     pcd = crop3d(dim, 2, pcd)
     pcd = pcd @ rot_matrix.T + trans
 
-    if len(pcd) < 100:
-        pcd_show1 = o3d.utility.Vector3dVector(org_pcd)
-        box = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=dim)
-        box2 = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=2 * dim)
-        pcd_show2 = o3d.utility.Vector3dVector(pcd)
-        o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show1), box])
-        o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show2), box2])
+    # if len(pcd) < 100:
+    #     pcd_show1 = o3d.utility.Vector3dVector(org_pcd)
+    #     box = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=dim)
+    #     box2 = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=2 * dim)
+    #     pcd_show2 = o3d.utility.Vector3dVector(pcd)
+    #     o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show1), box])
+    #     o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show2), box2])
 
     return [rot, trans, vertices, triangles, obj_mask, hand_mask, depth2d, pcd, camMat, crop_list]
+
+
+class Axis:
+    def __init__(self, path):
+        if path is None:
+            return
+        with open(path, "r") as f:
+            res = json.load(f)
+            axis_meta = res[0]["jointData"]
+            axis_info, limit = axis_meta["axis"], axis_meta["limit"]
+            self.orig = np.array(axis_info["origin"], dtype=np.float32)
+            self.direction = np.array(axis_info["direction"], dtype=np.float32)
+            self.direction /= np.linalg.norm(self.direction)
+            t_max, t_min, no_lim = limit["a"], limit["b"], limit["noLimit"]
+            self.rad_min = - t_min / 180 * np.pi
+            self.rad_max = - t_max / 180 * np.pi
+
+    def get_relative_rt(self, theta):
+        rot_mat = Rt.from_rotvec(self.direction * theta).as_matrix()
+        virt_trans = self.orig - rot_mat @ self.orig
+        return rot_mat, virt_trans
+
+
+def path_list2artobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_base_path, CAD_part_path,
+                           CAD_part_cannonical_path, mob_path, out_src_rot=None, outsrc_trans=None, out_src_theta=None):
+    rot_base, trans_base, dim_base = read_rtd(anno_path, 0)
+    rot_part, trans_part, dim_part = read_rtd(anno_path, 1)
+    theta = np.linalg.norm((Rt.from_rotvec(rot_base) * Rt.from_rotvec(rot_part).inv()).as_rotvec())
+    if out_src_rot is not None:
+        rot = out_src_rot
+    if outsrc_trans is not None:
+        trans = outsrc_trans
+    if out_src_theta is not None:
+        theta = out_src_theta
+    vertices_base, triangles_base = read_CAD_model(CAD_base_path, dim_base)
+    vertices_part, triangles_part = read_CAD_model(CAD_part_path, dim_part)
+    vertices_part_cannonical, triangles_part_cannonical = read_CAD_model(CAD_part_cannonical_path, dim_part)
+
+    depth2d = cv2.imread(dpt_path, cv2.IMREAD_UNCHANGED)
+    camMat = np.load(cam_in_path)
+    x1, x2, y1, y2, clean_mask = read_mask2bbox(mask_path, obj_color=3)
+    crop_list = [x1, x2, y1, y2]
+
+    depth2d = np.array(depth2d, dtype=np.float32) / 1000
+    obj_base_mask, hand_mask = read_mask(clean_mask, dscale=1, crop=crop_list)
+    obj_part_mask, _ = read_mask(clean_mask, obj_color=3, dscale=1, crop=crop_list)
+    obj_overall_mask = obj_base_mask + obj_part_mask
+    large_mask, _ = read_mask(clean_mask, dscale=1)
+    depth3d = o3d.geometry.Image(depth2d * large_mask[..., 0])
+    depth2d = depth2d[x1:x2, y1:y2]
+    hand_mask[np.where(depth2d < 0.001)] = 0
+
+    # load point cloud from depth
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(1920, 1080, camMat[0, 0], camMat[1, 1], camMat[0, 2], camMat[1, 2])
+    pcd = o3d.geometry.PointCloud.create_from_depth_image(depth3d, intrinsics, stride=2)
+    pcd = np.asarray(pcd.points)
+
+    axis_meta = Axis(mob_path)
+    para_meta = [rot_base, trans_base, rot_part, trans_part, theta]
+    mesh_meta = [vertices_base, triangles_base, vertices_part, triangles_part, vertices_part_cannonical,
+                 triangles_part_cannonical]
+    mask_meta = [obj_base_mask, obj_part_mask, obj_overall_mask, hand_mask]
+
+    return [axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd, camMat, crop_list]
 
 
 def every_path_generator_from_total_json(total_path, required_range=None):

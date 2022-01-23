@@ -220,15 +220,28 @@ class BatchObj(nn.Module):
 class ArtObj(nn.Module):
     """
     Support Articulated Object inputs
-    Not implemented yet
+    axis (class containing relative position, direction, limit),
+    parameters (7DoF &/| 2 * 6DoF),
+    meshes (vertices + triangles (simplified) : base, part, aligned part),
+    cropped masks (base, part, overall, mask of region occluded by hand or no depth),
+    cropped depth image,
+    3d-cropped depth point cloud,
+    camera intrinsics,
+    crop position in (1920, 1080),
+    method = 0: separately, 1: globally, 2: both
     """
-    def __init__(self, paras, objmesh, objseg, handMask, objdpt, pcd, camMat, crop=(0,1080,0,1920), size=1920):
+    def __init__(self, axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd, camMat, crop_list, method=0):
         super(ArtObj, self).__init__()
-        trans, rot, part_trans, part_rot, link_axis = paras
-        global_mesh, part_mesh = objmesh
+        rot = nn.Parameter(torch.FloatTensor([para_meta[0]]))
+        trans =  nn.Parameter(torch.FloatTensor([para_meta[1]]))
+        theta = nn.Parameter(torch.FloatTensor([para_meta[-1]]))
+
 
         raise NotImplementedError
 
+
+    def forward(self):
+        pass
 
 class Constraints(nn.Module):
     """
