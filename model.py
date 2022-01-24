@@ -50,13 +50,11 @@ class projCamera(nn.Module):
     """
     Perspective Camera Projection
     camera coordinate -> pixel coordinate
-    x = fx * x / z
-    y = - fy * y / z
+    x = x / z
+    y = - y / z
     """
-    def __init__(self, camMat):
+    def __init__(self):
         super(projCamera, self).__init__()
-        self.xscale = camMat[0, 0] / 1000
-        self.yscale = camMat[1, 1] / 1000
 
     def forward(self, mesh):
         ret1 = mesh[..., 0] / mesh[..., 2]
@@ -86,13 +84,23 @@ class projKps(nn.Module):
         return torch.stack([ret1, ret2, ret3], dim=-1)
 
 
+class AxisTheta(nn.Module):
+    """
+    Theta + Axis Annotation -> Inv Rot Mat, Virt Trans
+    """
+    def __init__(self):
+        super(AxisTheta, self).__init__()
+        self.I = nn.Parameter(torch.eye(3))
+        self.I.requires_grad = False
+        
+
 
 class PlainObj(nn.Module):
     """
     Single Rigid Object Pose Refine
-    R, T, CAD_model, gt_seg, gt_dpt, gt_pcd, ... -> losses, rendered_seg, rendered_
+    R, T, CAD_model, gt_seg, gt_dpt, gt_pcd, ... -> losses, rendered_seg, rendered_dpt
     transformed_v = R v + T
-    pcd_loss = EMDloss(transformed_v, gt_pcd)
+    pcd_loss = CDloss(transformed_v, gt_pcd)
     rendered_seg, rendered_dpt = SoftRas(projected_faces)
     seg_loss = ~HandMask * l1_loss(rendered_seg, gt_seg)
     dpt_loss = ~HandMask * l2_loss(rendered_dpt, gt_dpt)
@@ -108,7 +116,7 @@ class PlainObj(nn.Module):
         self.vertices.requires_grad = False
 
         self.vec2mat = invRodrigues()
-        self.cam2pix = projCamera(camMat)
+        self.cam2pix = projCamera()
         self.pcdloss = ChamferDistance()
 
         self.seg = nn.Parameter(torch.FloatTensor(objseg)[..., 0])
@@ -224,28 +232,95 @@ class BatchObj(nn.Module):
 class ArtObj(nn.Module):
     """
     Support Articulated Object inputs
-    axis (class containing relative position, direction, limit),
-    parameters (7DoF &/| 2 * 6DoF),
-    meshes (vertices + triangles (simplified) : base, part, aligned part),
-    cropped masks (base, part, overall, mask of region occluded by hand or no depth),
-    cropped depth image,
-    3d-cropped depth point cloud,
-    camera intrinsics,
-    crop position in (1920, 1080),
-    method = 0: separately, 1: globally, 2: both
+    {
+        axis (class containing relative position, direction, limit),
+        parameters (7DoF &/| 2 * 6DoF),
+        meshes (vertices + triangles (simplified) : base, part, aligned part),
+        cropped masks (base, part, overall, mask of region occluded by hand or no depth, hand + part, hand + base),
+        cropped depth image,
+        3d-cropped depth point cloud (base, part, both),
+        camera intrinsics,
+        crop position in (1920, 1080),
+        method = 0: separately, 1: globally, 2: both, 3: base unsupervised, 4: part unsupervised, 5: theta fixed
+    } -->
+    {
+        depth_loss, seg_loss, pcd_loss, rendered_depth, rendered_seg
+    }
+
     """
+    SEP12DoF, GLB7DoF, BOTH, BASE_OCD, PART_OCD, THT_FIX = list(range(6))
     def __init__(self, axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd, camMat, crop_list, method=0):
         super(ArtObj, self).__init__()
-        rot = nn.Parameter(torch.FloatTensor([para_meta[0]]))
-        trans =  nn.Parameter(torch.FloatTensor([para_meta[1]]))
-        theta = nn.Parameter(torch.FloatTensor([para_meta[-1]]))
 
+        # determine method
+        if len(pcd[0] < 10):
+            method = ArtObj.BASE_OCD
+        if len(pcd[1] < 10):
+            method = ArtObj.PART_OCD
 
-        raise NotImplementedError
+        # process parameters
+        # self.rot = nn.Parameter(torch.FloatTensor([para_meta[0]]))
+        # self.trans =  nn.Parameter(torch.FloatTensor([para_meta[1]]))
+        # self.rot_part = nn.Parameter(torch.FloatTensor([para_meta[2]]))
+        # self.trans_part = nn.Parameter(torch.FloatTensor([para_meta[3]]))
+        self.para = nn.Parameter(torch.FloatTensor(para_meta[:-1]))
+        self.theta = nn.Parameter(torch.FloatTensor([para_meta[-1]]))
+        self.vec2mat = invRodrigues()
+
+        # process mesh
+        if not method == ArtObj.BASE_OCD:
+            self.faces = nn.Parameter(torch.FloatTensor(mesh_meta[0][mesh_meta[1]]))
+            self.vertices = nn.Parameter(torch.FloatTensor(mesh_meta[0]))
+            self.faces.requires_grad = False
+            self.vertices.requires_grad = False
+        if not method == ArtObj.PART_OCD:
+            self.faces_part = nn.Parameter(torch.FloatTensor(mesh_meta[2][mesh_meta[3]]))
+            self.vertices_part = nn.Parameter(torch.FloatTensor(mesh_meta[2]))
+            self.faces_part_canonical = nn.Parameter(torch.FloatTensor(mesh_meta[4][mesh_meta[5]]))
+            self.vertices_part_canonical = nn.Parameter(torch.FloatTensor(mesh_meta[4]))
+            self.faces_part.requires_grad = False
+            self.vertices_part.requires_grad = False
+            self.faces_part_canonical.requires_grad = False
+            self.vertices_part_canonical.requires_grad = False
+
+        self.seg = nn.Parameter(torch.FloatTensor(mask_meta[:3])[..., 0])
+        self.dpt = nn.Parameter(torch.stack([torch.FloatTensor(depth2d)] * 3, dim=-1))
+        self.msk = nn.Parameter(torch.FloatTensor(mask_meta[3:]))
+
+        f = int(np.round(camMat[0, 0]))
+        x1, x2, y1, y2 = crop_list
+        self.crop = [x1 - int(np.round(camMat[1, 2])) + f, x2 - int(np.round(camMat[1, 2])) + f,
+                     y1 - int(np.round(camMat[0, 2])) + f, y2 - int(np.round(camMat[0, 2])) + f]
+
+        self.imsize = f * 2
 
 
     def forward(self):
-        pass
+        R_inv = self.vec2mat(self.rot)
+        transformed_faces = torch.matmul(self.faces, R_inv) + self.trans
+        transformed_vertices = torch.matmul(self.vertices, R_inv) + self.trans
+        projected_faces = self.cam2pix(transformed_faces)
+        projected_faces = projected_faces.unsqueeze(0)
+        depth = torch.stack([projected_faces[..., 2]] * 3, dim=-1)
+
+        render_result = srf.soft_rasterize(projected_faces, depth,
+                                           self.imsize, texture_type='vertex', near=0.1, eps=1e-4, )
+        render_result = render_result.squeeze(0).permute((1, 2, 0))
+        rendered_depth = render_result[self.crop[0]:self.crop[1], self.crop[2]:self.crop[3], :3]
+        rendered_seg = render_result[self.crop[0]:self.crop[1], self.crop[2]:self.crop[3], 3]
+
+        # print(transformed_vertices.is_cuda, self.pcd.is_cuda)
+        # input()
+        _, pcd_loss = self.pcdloss(transformed_vertices.unsqueeze(0), self.pcd.unsqueeze(0))
+        pcd_loss = torch.mean(pcd_loss)
+        masked_seg = rendered_seg * self.msk[:, :, 0]
+        seg_sum, seg_prod = masked_seg + self.seg, masked_seg * self.seg
+        seg_loss = 1 - torch.mean(torch.abs(seg_prod)) / torch.mean(torch.abs(seg_sum - seg_prod))
+        seg_mask = (torch.stack([rendered_seg.detach()] * 3, dim=-1) > 0.5).int()
+        dpt_loss = torch.mean(torch.abs(rendered_depth - self.dpt * seg_mask) * self.msk)
+
+        return pcd_loss, seg_loss, dpt_loss, rendered_seg, rendered_depth[:, :, 0]
+
 
 class Constraints(nn.Module):
     """
