@@ -40,7 +40,6 @@ class ManoLayer(Module):
             joint_rot_mode: 'axisang' or 'rotmat', ignored if use_pca
         """
         super().__init__()
-
         self.center_idx = center_idx
         self.robust_rot = robust_rot
         if root_rot_mode == 'axisang':
@@ -106,7 +105,6 @@ class ManoLayer(Module):
         self.kintree_table = smpl_data['kintree_table']
         parents = list(self.kintree_table[0].tolist())
         self.kintree_parents = parents
-
         # selected_components = np.vstack((hands_components[:ncomps]))
 
 
