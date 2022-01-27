@@ -47,8 +47,6 @@ def read_anno2objpath(file):
     except:
         return ''
     if labels not in mapping_dict:
-        print(file, labels)
-        input()
         return ''
     N_idx = file.index('N')
     try:
@@ -61,6 +59,43 @@ def read_anno2objpath(file):
         return out_file_name
     else:
         return ''
+
+
+def read_anno2articulated_objpath(file):
+    try:
+        with open(file, 'r', errors='ignore') as f:
+            cont = f.read()  # .replace(chr(0), '')
+        cont = eval(cont)
+        dataList = cont["dataList"]
+        assert len(dataList) == 2
+        labels = dataList[0]['label']
+        assert labels == "Laptopdisplay"
+    except:
+        return None
+
+    N_idx = file.index('N')
+    try:
+        num = int(file[N_idx+1:N_idx+3])
+    except:
+        num = int(file[N_idx+1])
+    num_str = str(num).zfill(3)
+    CAD_part_canonical_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/笔记本电脑/' + num_str + "/objs/new-0-align.obj"
+    CAD_base_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-1.obj'
+    CAD_part_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-0.obj'
+    if num == 41:
+        CAD_base_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-2.obj'
+        CAD_part_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-1.obj'
+        CAD_part_canonical_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/笔记本电脑/' + num_str + "/objs/new-1-align.obj"
+
+    mob_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + "/mobility_v2.json"
+
+    # print(mob_path, os.path.exists(mob_path))
+    # input("cont?")
+
+    if os.path.exists(mob_path):
+        return (CAD_part_canonical_path, CAD_base_path, CAD_part_path, mob_path)
+    else:
+        return None
 
 
 def read_mask(mask, hand_color=2, obj_color=1, dscale=10, crop=(0,1080,0,1920)):
@@ -143,6 +178,12 @@ def read_mask2bbox(filename, obj_color=1, denoise=True):
 
     color_map = get_color_map()
     obj_idx = np.where((clean_mask == color_map[obj_color][::-1]).all(axis=2))
+    if obj_color == 3:
+        obj_base_idx = np.where((clean_mask == color_map[1][::-1]).all(axis=2))
+
+        obj_idx = (np.c_[[obj_idx[0]], [obj_base_idx[0]]], np.c_[[obj_idx[1]], [obj_base_idx[1]]])
+
+
     min_x, max_x = np.min(obj_idx[0]), np.max(obj_idx[0])
     min_y, max_y = np.min(obj_idx[1]), np.max(obj_idx[1])
     x_size = max_x - min_x
@@ -172,14 +213,33 @@ def read_mask2bbox(filename, obj_color=1, denoise=True):
     return int(x1), int(x2), int(y1), int(y2), clean_mask #int(cx), int(cy)  #, d_size * 1.5)
 
 
-def read_CAD_model(CAD_path, dim):
+def read_CAD_model_part(path, scale, trans):
+    if not os.path.exists(path):
+        print(path)
+        raise AssertionError
+    mesh = o3d.io.read_triangle_mesh(path)
+    voxel_size = max(mesh.get_max_bound() - mesh.get_min_bound()) / 32
+    mesh_smp = mesh.simplify_vertex_clustering(voxel_size=voxel_size,
+                                               contraction=o3d.geometry.SimplificationContraction.Average)
+    vertices = np.asarray(mesh_smp.vertices)
+    triangles = np.asarray(mesh_smp.triangles)
+    v_max = np.max(vertices, axis=0)
+    v_min = np.min(vertices, axis=0)
+    v_center = (v_max + v_min) / 2
+    vertices -= v_center
+    vertices *= scale
+    vertices += v_center + trans
+    return vertices, triangles
+
+
+def read_CAD_model(CAD_path, dim, keep_translation=False, return_translation=False):
     if os.path.exists('/mnt/8T/kangbo' + CAD_path + 'v.npy'):
         vertices = np.load('/mnt/8T/kangbo' + CAD_path + 'v.npy')
         triangles = np.load('/mnt/8T/kangbo' + CAD_path + 't.npy')
     else:
-        new_path = '/mnt/8T/kangbo' + os.path.dirname(CAD_path)
-        if not os.path.exists(new_path):
-            os.makedirs(new_path)
+        # new_path = '/mnt/8T/kangbo' + os.path.dirname(CAD_path)
+        # if not os.path.exists(new_path):
+        #     os.makedirs(new_path)
         mesh = o3d.io.read_triangle_mesh(CAD_path)
 
         # simplify the CAD model
@@ -200,14 +260,22 @@ def read_CAD_model(CAD_path, dim):
         max_scalar = np.max(scalar)
         if max_scalar > 1.:
             vertices /= max_scalar
+            coef = max_scalar
         elif max_scalar < 0.92:
             vertices /= max_scalar / 0.95
-        np.save('/mnt/8T/kangbo' + CAD_path + 'v.npy', vertices)
-        np.save('/mnt/8T/kangbo' + CAD_path + 't.npy', triangles)
+            coef = max_scalar / 0.95
+        else:
+            coef = 1
+        # np.save('/mnt/8T/kangbo' + CAD_path + 'v.npy', vertices)
+        # np.save('/mnt/8T/kangbo' + CAD_path + 't.npy', triangles)
+        if keep_translation:
+            vertices += v_center
+        if return_translation:
+            return vertices, triangles, v_center, coef
     return vertices, triangles
 
 
-def folder_path_generator_from_total_json(total_path):
+def folder_path_generator_from_total_json(total_path, articulated=False):
     with open(total_path, 'r') as f:
         total_list = f.read()
         total_list = eval(total_list)
@@ -232,15 +300,20 @@ def folder_path_generator_from_total_json(total_path):
         mask_path =  mask_path + '/mask/'
         cam_out_path = out_path + '/output.log'
         rgb_path = depth_path[:-5] + 'image'
-        CAD_path = read_anno2objpath(json_path + '/' + str(0) + '.json')
-        if not CAD_path:
-            continue
+        if not articulated:
+            CAD_path = read_anno2objpath(json_path + '/' + str(0) + '.json')
+            if not CAD_path:
+                continue
+        else:
+            CAD_path = read_anno2articulated_objpath(json_path + '/' + str(0) + '.json')
+            if CAD_path is None:
+                continue
 
         yield [cam_in_path, mask_path, cam_out_path, depth_path, rgb_path, json_path, CAD_path]
 
 
-def annoed_path_generator_from_total_json(total_path):
-    for data in folder_path_generator_from_total_json(total_path):
+def annoed_path_generator_from_total_json(total_path, articulated=False):
+    for data in folder_path_generator_from_total_json(total_path, articulated):
         cam_in_path, mask_path, cam_out_path, depth_path, rgb_path, json_path, CAD_path = data
 
         all_num_list = list(range(0, 295, 10)) + [299]
@@ -295,15 +368,123 @@ def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_pa
     pcd = crop3d(dim, 2, pcd)
     pcd = pcd @ rot_matrix.T + trans
 
-    if len(pcd) < 100:
-        pcd_show1 = o3d.utility.Vector3dVector(org_pcd)
-        box = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=dim)
-        box2 = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=2 * dim)
-        pcd_show2 = o3d.utility.Vector3dVector(pcd)
-        o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show1), box])
-        o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show2), box2])
+    # if len(pcd) < 100:
+    #     pcd_show1 = o3d.utility.Vector3dVector(org_pcd)
+    #     box = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=dim)
+    #     box2 = o3d.geometry.OrientedBoundingBox(center=trans, R=Rt.from_rotvec(rot).as_matrix(), extent=2 * dim)
+    #     pcd_show2 = o3d.utility.Vector3dVector(pcd)
+    #     o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show1), box])
+    #     o3d.visualization.draw_geometries([o3d.geometry.PointCloud(pcd_show2), box2])
 
     return [rot, trans, vertices, triangles, obj_mask, hand_mask, depth2d, pcd, camMat, crop_list]
+
+
+class Axis:
+    def __init__(self, path):
+        if path is None:
+            return
+        with open(path, "r") as f:
+            res = json.load(f)
+            axis_meta = res[0]["jointData"]
+            axis_info, limit = axis_meta["axis"], axis_meta["limit"]
+            self.orig = np.array(axis_info["origin"], dtype=np.float32)
+            self.direction = np.array(axis_info["direction"], dtype=np.float32)
+            self.direction /= np.linalg.norm(self.direction)
+            t_max, t_min, no_lim = limit["a"], limit["b"], limit["noLimit"]
+            self.rad_min = - t_min / 180 * np.pi
+            self.rad_max = - t_max / 180 * np.pi
+            self.rot_mat = Rt.from_rotvec(self.direction).as_matrix()
+            
+    def get_relative_rt(self, theta):
+        rot_mat = Rt.from_rotvec(self.direction * theta).as_matrix()
+        virt_trans = self.orig - rot_mat @ self.orig
+        return rot_mat, virt_trans
+
+
+def path_list2artobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_meta,
+                           out_src_rot=None, outsrc_trans=None, out_src_theta=None):
+    CAD_part_canonical_path, CAD_base_path, CAD_part_path, mob_path = CAD_meta
+    rot_base, trans_base, dim_base = read_rtd(anno_path, 0)
+    rot_part, trans_part, dim_part = read_rtd(anno_path, 1)
+    theta = np.linalg.norm((Rt.from_rotvec(rot_base) * Rt.from_rotvec(rot_part).inv()).as_rotvec())
+    if out_src_rot is not None:
+        rot = out_src_rot
+    if outsrc_trans is not None:
+        trans = outsrc_trans
+    if out_src_theta is not None:
+        theta = out_src_theta
+    vertices_base, triangles_base, base_translation, coef = read_CAD_model(CAD_base_path, dim_base, return_translation=True)
+    vertices_part, triangles_part = read_CAD_model_part(CAD_part_path, coef, base_translation)
+    vertices_part += base_translation
+    vertices_part_canonical, triangles_part_canonical = read_CAD_model(CAD_part_canonical_path, dim_part)
+
+    depth2d = cv2.imread(dpt_path, cv2.IMREAD_UNCHANGED)
+    camMat = np.load(cam_in_path)
+    x1, x2, y1, y2, clean_mask = read_mask2bbox(mask_path, obj_color=3)
+    crop_list = [x1, x2, y1, y2]
+
+    depth2d = np.array(depth2d, dtype=np.float32) / 1000
+    obj_base_mask, hand_mask = read_mask(clean_mask, dscale=1, crop=crop_list)
+    large_mask_base, _ = read_mask(clean_mask, dscale=1)
+    large_mask_part, _ = read_mask(clean_mask, obj_color=3, dscale=1)
+    large_mask_overall = large_mask_part + large_mask_base
+    obj_part_mask = large_mask_part[x1:x2, y1:y2, :]
+    obj_overall_mask = obj_base_mask + obj_part_mask
+    depth3d_base = o3d.geometry.Image(depth2d * large_mask_base[..., 0])
+    depth3d_part = o3d.geometry.Image(depth2d * large_mask_part[..., 0])
+    depth3d_all = o3d.geometry.Image(depth2d * large_mask_overall[..., 0])
+    depth2d = depth2d[x1:x2, y1:y2]
+    hand_mask[np.where(depth2d < 0.001)] = 0
+    hand_and_part = hand_mask * ( 1 - obj_part_mask )
+    hand_and_base = hand_mask * ( 1 - obj_base_mask )
+
+    # load point cloud from depth
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(1920, 1080, camMat[0, 0], camMat[1, 1], camMat[0, 2], camMat[1, 2])
+    pcd_part = o3d.geometry.PointCloud.create_from_depth_image(depth3d_part, intrinsics, stride=2)
+    pcd_base = o3d.geometry.PointCloud.create_from_depth_image(depth3d_base, intrinsics, stride=2)
+    pcd_all = o3d.geometry.PointCloud.create_from_depth_image(depth3d_all, intrinsics, stride=2)
+    pcd_part = np.asarray(pcd_part.points)
+    pcd_base = np.asarray(pcd_base.points)
+    pcd_all = np.asarray(pcd_all.points)
+
+    axis_meta = Axis(mob_path)
+    axis_meta.orig += base_translation
+    para_meta = [rot_base, trans_base, rot_part, trans_part, theta]
+    mesh_meta = [vertices_base, triangles_base, vertices_part, triangles_part, vertices_part_canonical,
+                 triangles_part_canonical]
+    mask_meta = [obj_base_mask, obj_part_mask, obj_overall_mask, hand_and_part, hand_and_base, hand_mask]
+    pcd_list = [pcd_base, pcd_part, pcd_all]
+
+    return [axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd_list, camMat, crop_list]
+
+
+def articulated_object_path_generator_from_total_json(total_path, required_range=None):
+    for data in folder_path_generator_from_total_json(total_path):
+        cam_in_path, mask_path, cam_out_path, depth_path, rgb_path, json_path, CAD_path = data
+
+        all_ret_list = []
+
+        if required_range is None:
+            required_range = range(300)
+
+        for num in required_range:
+            cur_mask_path = mask_path + str(num).zfill(5) + '.png'
+            cur_dpt_path = depth_path + '/' + str(num) + '.png'
+            cur_json_path = json_path + '/' + '0' + '.json'
+            cur_rgb_path = rgb_path + '/' + str(num) + '.jpg'
+
+            if not os.path.exists(cur_json_path):
+                cur_json_path = json_path + '/' + '0'.zfill(5) + '.json'
+
+            all_ret_list.append([cam_in_path,
+                                 cur_dpt_path,
+                                 cur_mask_path,
+                                 cur_json_path,
+                                 CAD_path,
+                                 cam_out_path,
+                                 cur_rgb_path,
+                                 ])
+        yield all_ret_list
 
 
 def every_path_generator_from_total_json(total_path, required_range=None):

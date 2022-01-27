@@ -16,11 +16,8 @@ from manopth.manopth import demo
 
 from vis import *
 
-# import soft_renderer.functional as srf
-# from emd import EMDLoss
-from chamfer_distance import ChamferDistance
 import soft_renderer.functional as srf
-from emd import EMDLoss
+# from emd import EMDLoss
 from chamfer_distance import ChamferDistance
 
 
@@ -50,13 +47,11 @@ class projCamera(nn.Module):
     """
     Perspective Camera Projection
     camera coordinate -> pixel coordinate
-    x = fx * x / z
-    y = - fy * y / z
+    x = x / z
+    y = - y / z
     """
-    def __init__(self, camMat):
+    def __init__(self):
         super(projCamera, self).__init__()
-        self.xscale = camMat[0, 0] / 1000
-        self.yscale = camMat[1, 1] / 1000
 
     def forward(self, mesh):
         ret1 = mesh[..., 0] / mesh[..., 2]
@@ -86,13 +81,33 @@ class projKps(nn.Module):
         return torch.stack([ret1, ret2, ret3], dim=-1)
 
 
+class AxisTheta(nn.Module):
+    """
+    Theta + Axis Annotation -> Inv Rot Mat, Virtual Trans
+    """
+    def __init__(self, axis):
+        super(AxisTheta, self).__init__()
+        self.I = nn.Parameter(torch.eye(3))
+        self.I.requires_grad = False
+        self.omegaMat = nn.Parameter(torch.FloatTensor(axis.rot_mat))
+        self.omegaMat.requires_grad = False
+        self.orig = nn.Parameter(torch.FloatTensor(axis.orig))
+        self.orig.requires_grad = False
+        self.theta_min, self.theta_max = axis.rad_min, axis.rad_max
+
+    def forward(self, theta):
+        R = self.I + torch.sin(theta) * self.omegaMat + \
+            (1 - torch.cos(theta)) * torch.mm(self.omegaMat, self.omegaMat)
+        virt_trans = self.orig - torch.mm(R, self.orig)
+        return R.transpose(0, 1), virt_trans
+
 
 class PlainObj(nn.Module):
     """
     Single Rigid Object Pose Refine
-    R, T, CAD_model, gt_seg, gt_dpt, gt_pcd, ... -> losses, rendered_seg, rendered_
+    R, T, CAD_model, gt_seg, gt_dpt, gt_pcd, ... -> losses, rendered_seg, rendered_dpt
     transformed_v = R v + T
-    pcd_loss = EMDloss(transformed_v, gt_pcd)
+    pcd_loss = CDloss(transformed_v, gt_pcd)
     rendered_seg, rendered_dpt = SoftRas(projected_faces)
     seg_loss = ~HandMask * l1_loss(rendered_seg, gt_seg)
     dpt_loss = ~HandMask * l2_loss(rendered_dpt, gt_dpt)
@@ -108,7 +123,7 @@ class PlainObj(nn.Module):
         self.vertices.requires_grad = False
 
         self.vec2mat = invRodrigues()
-        self.cam2pix = projCamera(camMat)
+        self.cam2pix = projCamera()
         self.pcdloss = ChamferDistance()
 
         self.seg = nn.Parameter(torch.FloatTensor(objseg)[..., 0])
@@ -221,17 +236,181 @@ class BatchObj(nn.Module):
         return pcd_loss, seg_loss, dpt_loss, rendered_seg, rendered_depth
 
 
+class FaceVertices(nn.Module):
+    """
+    wavefront -> transformed CAD model
+    __init__: vertices [n, 3], triangles [n, 3] -> vertices [n, 3], faces [n, 3, 3]
+    forward: R [3, 3], t [3] -> transformed vertices [1, n, 3], faces [1, n, 3, 3], depth [1, n, 3, 3]
+    """
+    def __init__(self, vertices, triangles):
+        super(FaceVertices, self).__init__()
+        self.cam2pix = projCamera()
+        self.faces = nn.Parameter(torch.FloatTensor(vertices[triangles]))
+        self.vertices = nn.Parameter(torch.FloatTensor(vertices))
+        self.faces.requires_grad = False
+        self.vertices.requires_grad = False
+
+    def forward(self, R_inv, trans):
+        transformed_faces = torch.matmul(self.faces, R_inv) + trans
+        transformed_vertices = torch.matmul(self.vertices, R_inv) + trans
+        projected_faces = self.cam2pix(transformed_faces)
+        projected_faces = projected_faces.unsqueeze(0)
+        depth = torch.stack([projected_faces[..., 2]] * 3, dim=-1)
+        return transformed_vertices.unsqueeze(0), projected_faces, depth
+
+
+class SegDptLossBatch(nn.Module):
+    def __init__(self):
+        super(SegDptLossBatch, self).__init__()
+
+    def forward(self, batch_seg, batch_depth, batch_msk):
+        masked_seg = batch_seg * batch_msk[..., 0]
+        seg_sum, seg_prod = masked_seg + self.seg, masked_seg * self.seg
+        seg_loss = 1 - torch.mean(torch.abs(seg_prod), keepdim=0) / torch.mean(torch.abs(seg_sum - seg_prod), keepdim=0)
+        seg_mask = (torch.stack([batch_seg.detach()] * 3, dim=-1) > 0.5).int()
+        dpt_loss = torch.mean(torch.abs(batch_depth - self.dpt * seg_mask) * batch_msk, keepdim=0)
+        return seg_loss, dpt_loss
+
+
+class SoftRasLayer(nn.Module):
+    """
+
+    """
+    def __init__(self, image_size, crop_list):
+        super(SoftRasLayer, self).__init__()
+        self.imsize = image_size
+        self.crop = crop_list
+
+    def forward(self, faces, depth):
+        render_result = srf.soft_rasterize(faces, depth, self.imsize, texture_type='vertex',
+                                           near=0.1, eps=1e-4, gamma_val=1e-5, dist_eps=1e-5)
+        render_result = render_result.squeeze(0).permute((1, 2, 0))
+        rendered_depth = render_result[self.crop[0]:self.crop[1], self.crop[2]:self.crop[3], :3]
+        rendered_seg = render_result[self.crop[0]:self.crop[1], self.crop[2]:self.crop[3], 3]
+        return rendered_seg, rendered_depth
+
+
 class ArtObj(nn.Module):
     """
-    Support Articulated Object inputs
-    Not implemented yet
-    """
-    def __init__(self, paras, objmesh, objseg, handMask, objdpt, pcd, camMat, crop=(0,1080,0,1920), size=1920):
-        super(ArtObj, self).__init__()
-        trans, rot, part_trans, part_rot, link_axis = paras
-        global_mesh, part_mesh = objmesh
+    Support Articulated Object
+    {
+        axis (class containing relative position, direction, limit),
+        parameters (7DoF &/| 2 * 6DoF),
+        meshes (vertices + triangles (simplified) : base, part, aligned part),
+        cropped masks (base, part, overall, mask of region occluded by hand or no depth, hand + part, hand + base),
+        cropped depth image,
+        3d-cropped depth point cloud (base, part, both),
+        camera intrinsics,
+        crop position in (1920, 1080),
+        method = 0: separately, 1: globally, 2: both, 3: base unsupervised, 4: part unsupervised, 5: theta fixed
+    } -->
+    {
+        depth_loss : List[both pcd loss, base pcd loss, part pcd loss], (may contain None)
+        seg_loss : Tensor [1, 3], pcd_loss, rendered_depth, rendered_seg
+    }
 
-        raise NotImplementedError
+    """
+    SEP12DoF, GLB7DoF, BOTH, THT_FIX = list(range(4))
+    def __init__(self, axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd, camMat, crop_list, method=2):
+        super(ArtObj, self).__init__()
+
+        # process parameters
+        self.para = nn.Parameter(torch.FloatTensor(para_meta[:-1]))
+        self.theta = nn.Parameter(torch.FloatTensor([para_meta[-1]]))
+        if method == ArtObj.THT_FIX:
+            self.theta.requires_grad = False
+        self.vec2mat = invRodrigues()
+
+        # load point cloud
+        if len(pcd[0] < 10):
+            self.pcd0 = None
+        else:
+            self.pcd0 = nn.Parameter(torch.FloatTensor(pcd[0]))
+            self.pcd0.requires_grad = False
+        if len(pcd[1] < 10):
+            self.pcd1 = None
+        else:
+            self.pcd1 = nn.Parameter(torch.FloatTensor(pcd[1]))
+            self.pcd1.requires_grad = False
+        self.pcd = nn.Parameter(torch.FloatTensor(pcd[2]))
+        self.pcd.requires_grad = False
+
+        # load mesh
+        self.mesh_base = FaceVertices(mesh_meta[0], mesh_meta[1])
+        self.mesh_part = FaceVertices(mesh_meta[2], mesh_meta[3])
+        self.mesh_part_canonical = FaceVertices(mesh_meta[4], mesh_meta[5])
+
+        # cropped 2d images
+        self.seg = nn.Parameter(torch.FloatTensor(mask_meta[:3])[..., 0])
+        self.dpt = nn.Parameter(torch.stack([torch.FloatTensor(depth2d)] * 3, dim=-1))
+        self.msk = nn.Parameter(torch.FloatTensor(mask_meta[3:]))
+        self.seg.requires_grad = False
+        self.dpt.requires_grad = False
+        self.msk.requires_grad = False
+
+        # external modules
+        self.axis = AxisTheta(axis_meta)
+        self.vec2mat = invRodrigues()
+        self.pcdloss = ChamferDistance()
+        self.criterion2d = SegDptLossBatch()
+
+        # size info
+        f = int(np.round(camMat[0, 0]))
+        x1, x2, y1, y2 = crop_list
+        self.crop = [x1 - int(np.round(camMat[1, 2])) + f, x2 - int(np.round(camMat[1, 2])) + f,
+                     y1 - int(np.round(camMat[0, 2])) + f, y2 - int(np.round(camMat[0, 2])) + f]
+
+        self.srf_layer = SoftRasLayer(2 * f, crop_list)
+
+
+    def forward(self):
+        base_Rinv = self.vec2mat(self.para[0])
+        base_verts, base_faces, base_depth = self.mesh_base(base_Rinv, self.para[1])
+        part_Rinv_canonical = self.vec2mat(self.para[2])
+        part_verts_canonical, part_faces_canonical, part_depth_canonical = self.mesh_part_canonical(part_Rinv_canonical, self.para[3])
+        part_rel_Rinv, virt_trans = self.axis(self.theta)
+        part_Rinv = torch.mm(part_rel_Rinv, base_Rinv)
+        part_trans = torch.mm(base_Rinv.transpose(0, 1), virt_trans) + self.para[1]
+        part_verts, part_faces, part_depth = self.mesh_part(part_Rinv, part_trans)
+
+        both_faces = torch.cat([base_faces, part_faces])
+        both_depth = torch.cat([base_depth, part_depth])
+        base_seg, base_depth2d = self.srf_layer(base_faces, base_depth)
+        both_seg, both_depth2d = self.srf_layer(both_faces , both_depth)
+        part_seg_canonical, part_depth2d_canonical = self.srf_layer(part_faces_canonical, part_depth_canonical)
+
+        all_seg = torch.cat([base_seg, part_seg_canonical, both_seg])
+        all_depth2d = torch.cat([base_depth2d, part_depth2d_canonical, both_depth2d])
+        seg_loss, depth_loss = self.criterion2d(all_seg, all_depth2d)
+
+        if self.method == self.SEP12DoF:
+            _, pcd_loss = self.pcdloss(torch.cat((base_verts, part_verts), dim=1), self.pcd.unsqueeze(0))
+        else:
+            pcd_loss = None
+        if self.pcd0 is not None and self.method != self.GLB7DoF:
+            _, pcd_base = self.pcdloss(base_verts, self.pcd0.unsqueeze(0))
+        else:
+            pcd_base = None
+        if self.pcd1 is not None and self.method != self.GLB7DoF:
+            _, pcd_part = self.pcdloss(part_verts_canonical, self.pcd1.unsqueeze(0))
+        else:
+            pcd_part = None
+
+        if self.method == self.BOTH:
+            _, constraint_loss = self.pcdloss(self.pcd.unsqueeze(0), self.pcd1.unsqueeze(0))
+        """
+        if self.method == self.BOTH:
+            # part_Rinv approx part_Rinv_canonical
+            torch.trace(torch.mm(part_Rinv, part_Rinv_canonical.transpose(0, 1)))
+            constraint_loss_rot = torch.arccos((torch.trace(torch.mm(part_Rinv, part_Rinv_canonical.transpose(0, 1))) - 1) / 2)
+            constraint_loss_trans = torch.square()
+        else:
+            constraint_loss = None
+        
+        # Need Umeyama algo. to find rel. pose from can. to part
+        """
+
+        return [pcd_loss, pcd_base, pcd_part], seg_loss, depth_loss, all_seg, all_depth2d[..., 0]
 
 
 class Constraints(nn.Module):
@@ -243,6 +422,7 @@ class Constraints(nn.Module):
         super(Constraints, self).__init__()
         self.cuda_device = cuda_id
         self.thetaLimits()
+
     def thetaLimits(self):
         MINBOUND = -5.
         MAXBOUND = 5.
