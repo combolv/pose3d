@@ -98,7 +98,7 @@ class AxisTheta(nn.Module):
     def forward(self, theta):
         R = self.I + torch.sin(theta) * self.omegaMat + \
             (1 - torch.cos(theta)) * torch.mm(self.omegaMat, self.omegaMat)
-        virt_trans = self.orig - torch.mm(R, self.orig)
+        virt_trans = self.orig - R @ self.orig
         return R.transpose(0, 1), virt_trans
 
 
@@ -165,7 +165,8 @@ class PlainObj(nn.Module):
         seg_loss = 1 - torch.mean(torch.abs(seg_prod)) / torch.mean(torch.abs(seg_sum - seg_prod))
         seg_mask = (torch.stack([rendered_seg.detach()] * 3, dim=-1) > 0.5).int()
         dpt_loss = torch.mean(torch.abs(rendered_depth - self.dpt * seg_mask) * self.msk)
-
+        # else:
+        #     dpt_loss =
         return pcd_loss, seg_loss, dpt_loss, rendered_seg, rendered_depth[:, :, 0]
 
 
@@ -211,7 +212,7 @@ class BatchObj(nn.Module):
 
         # self.crop = crop
 
-    def forward(self):
+    def forward(self, depth_loss_rq=False):
         R_inv = self.vec2mat(self.rotvec)
         transformed_faces = torch.matmul(self.faces, R_inv) + self.trans
         transformed_vertices = torch.matmul(self.vertices, R_inv) + self.trans
@@ -231,7 +232,10 @@ class BatchObj(nn.Module):
         seg_loss = torch.mean(torch.abs(rendered_seg - self.seg) * self.msk[:, :, :, 0])
         # print(rendered_depth.size(), self.dpt.size(), self.msk.size())
         # input()
-        dpt_loss = torch.mean(torch.square(rendered_depth - self.dpt) * self.msk)
+        if depth_loss_rq:
+            dpt_loss = torch.mean(torch.square(rendered_depth - self.dpt) * self.msk)
+        else:
+            dpt_loss = 0.0
 
         return pcd_loss, seg_loss, dpt_loss, rendered_seg, rendered_depth
 
@@ -263,13 +267,17 @@ class SegDptLossBatch(nn.Module):
     def __init__(self):
         super(SegDptLossBatch, self).__init__()
 
-    def forward(self, batch_seg, batch_depth, batch_msk):
+        # TODO: move seg, dpt, msk init here
+        # TODO: register
+        # TODO: bug fixed(check by o3d)
+
+    def forward(self, batch_seg, batch_depth, batch_msk, gt_seg):
         masked_seg = batch_seg * batch_msk[..., 0]
-        seg_sum, seg_prod = masked_seg + self.seg, masked_seg * self.seg
-        seg_loss = 1 - torch.mean(torch.abs(seg_prod), keepdim=0) / torch.mean(torch.abs(seg_sum - seg_prod), keepdim=0)
+        seg_sum, seg_prod = masked_seg + gt_seg, masked_seg * gt_seg
+        seg_loss = 1 - torch.mean(torch.abs(seg_prod), (1, 2)) / torch.mean(torch.abs(seg_sum - seg_prod), (1, 2))
         seg_mask = (torch.stack([batch_seg.detach()] * 3, dim=-1) > 0.5).int()
-        dpt_loss = torch.mean(torch.abs(batch_depth - self.dpt * seg_mask) * batch_msk, keepdim=0)
-        return seg_loss, dpt_loss
+        # dpt_loss = torch.mean(torch.abs(batch_depth - self.dpt * seg_mask) * batch_msk, keepdim=0)
+        return seg_loss, None #, dpt_loss
 
 
 class SoftRasLayer(nn.Module):
@@ -287,6 +295,7 @@ class SoftRasLayer(nn.Module):
         render_result = render_result.squeeze(0).permute((1, 2, 0))
         rendered_depth = render_result[self.crop[0]:self.crop[1], self.crop[2]:self.crop[3], :3]
         rendered_seg = render_result[self.crop[0]:self.crop[1], self.crop[2]:self.crop[3], 3]
+
         return rendered_seg, rendered_depth
 
 
@@ -313,6 +322,7 @@ class ArtObj(nn.Module):
     SEP12DoF, GLB7DoF, BOTH, THT_FIX = list(range(4))
     def __init__(self, axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd, camMat, crop_list, method=2):
         super(ArtObj, self).__init__()
+        self.method = method
 
         # process parameters
         self.para = nn.Parameter(torch.FloatTensor(para_meta[:-1]))
@@ -370,18 +380,19 @@ class ArtObj(nn.Module):
         part_verts_canonical, part_faces_canonical, part_depth_canonical = self.mesh_part_canonical(part_Rinv_canonical, self.para[3])
         part_rel_Rinv, virt_trans = self.axis(self.theta)
         part_Rinv = torch.mm(part_rel_Rinv, base_Rinv)
-        part_trans = torch.mm(base_Rinv.transpose(0, 1), virt_trans) + self.para[1]
+        part_trans = base_Rinv.transpose(0, 1) @ virt_trans + self.para[1]
         part_verts, part_faces, part_depth = self.mesh_part(part_Rinv, part_trans)
 
-        both_faces = torch.cat([base_faces, part_faces])
-        both_depth = torch.cat([base_depth, part_depth])
+        both_faces = torch.cat([base_faces, part_faces], dim=1)
+        both_depth = torch.cat([base_depth, part_depth], dim=1)
         base_seg, base_depth2d = self.srf_layer(base_faces, base_depth)
         both_seg, both_depth2d = self.srf_layer(both_faces , both_depth)
         part_seg_canonical, part_depth2d_canonical = self.srf_layer(part_faces_canonical, part_depth_canonical)
 
-        all_seg = torch.cat([base_seg, part_seg_canonical, both_seg])
-        all_depth2d = torch.cat([base_depth2d, part_depth2d_canonical, both_depth2d])
-        seg_loss, depth_loss = self.criterion2d(all_seg, all_depth2d)
+        all_seg = torch.stack([base_seg, part_seg_canonical, both_seg])
+        all_depth2d = torch.stack([base_depth2d, part_depth2d_canonical, both_depth2d])
+
+        seg_loss, depth_loss = self.criterion2d(all_seg, all_depth2d, self.msk, self.seg)
 
         if self.method == self.SEP12DoF:
             _, pcd_loss = self.pcdloss(torch.cat((base_verts, part_verts), dim=1), self.pcd.unsqueeze(0))

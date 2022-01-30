@@ -178,100 +178,89 @@ def anna_result_check_gt_loss_terms():
 
 def get_all_path_list():
     all_list = []
-    new_list = []
-    cnt = 0
-    ban_obj = None
     for path_lists in every_path_generator_from_total_json('total.json'):
-        cnt += 1
-        if cnt == 1:
-            ban_obj = path_lists[-3]
-            continue
-        if ban_obj in path_lists :
-            #
-            continue
         all_list.append(path_lists)
-    torch.save(all_list, 'all_list.pt')
+    torch.save(all_list, 'mug_list.pt')
 
 
-def optim_pipeline(cuda_num=0, start_pos=0):
+def optim_pipeline(cuda_num=0, start_pos=0, object_name="mug", end_pos=100):
+    assert object_name in ['mug', 'bottle']
     print('Start:cuda=', cuda_num)
     with torch.cuda.device(cuda_num):
         from model import PlainObj
-        out_path = '/home/yunze/pose3d_lkb/output/'
-        all_list = torch.load('all_list.pt')
+        out_path = '/home/yunze/pose3d_lkb/'+ object_name + '_check/'
+        all_list = torch.load(object_name + '_list.pt')
         for j, path_lists in enumerate(all_list):
-            if j < start_pos:
+            if j < start_pos or j > end_pos:
                 continue
-            new_out_path = path_lists[0][5].replace('20211110', 'seg_3dnew/seg_3d')
-            if not os.path.exists(new_out_path):
-                new_out_path = path_lists[0][5]
-            inter_rot, inter_trans = get_all_poses_from_0json_path_and_output_log_path(path_lists[0][3], new_out_path)
+            if os.path.exists(out_path + str(j) + 'trans.npy'):
+                continue
+            # new_out_path = path_lists[0][5].replace('20211110', 'seg_3dnew/seg_3d')
+            # if not os.path.exists(new_out_path):
+            #     new_out_path = path_lists[0][5]
+            inter_rot, inter_trans = get_all_poses_from_0json_path_and_output_log_path(path_lists[0][3], path_lists[0][5])
             if inter_rot is None:
                 continue
             fin_all_rot, fin_all_trans = [], []
-            # try:
-            for i, path_list in tqdm(enumerate(path_lists)):
-                # print(len(inter_rot), len(path_lists))
-                # input()
-                # if i != 120:
-                #     continue
-                model_input = path_list2plainobj_input(*path_list[:5], inter_rot[i], inter_trans[i])
-                # try:
-                init_model = PlainObj(*model_input)
-                init_model.cuda()
-                pcd_loss, seg_loss, dpt_loss, dep, seg = init_model()
-                a = pcd_loss * 300 + seg_loss
-                a.backward()
-                # except RuntimeError as e:
-                #     print(e)
-                #     break
-                print('Start', j , ":", i)
-                vis2d(dep, seg, path_list[-1], model_input[-1], out_path + str(j) + '/before/' + str(i) + '.png')
-                init_model = PlainObj(*model_input)
-                init_model.cuda()
-                optimizer = optim.Adam(init_model.parameters(), lr=0.001)
-                all_pcd_loss = []
-                all_seg_loss = []
-                all_dpt_loss = []
-                dep, seg = None, None
-                for _ in range(50):
-                    optimizer.zero_grad()
+            try:
+                for i, path_list in tqdm(enumerate(path_lists)):
+                    # print(len(inter_rot), len(path_lists))
+                    # input()
+                    model_input = path_list2plainobj_input(*path_list[:5], inter_rot[i], inter_trans[i])
+                    # try:
+                    init_model = PlainObj(*model_input)
+                    init_model.cuda()
                     pcd_loss, seg_loss, dpt_loss, dep, seg = init_model()
-                    all_loss = pcd_loss * 100 + seg_loss + 0.2 * dpt_loss # / seg_loss.item()  + dpt_loss / dpt_loss.item()
-                    all_loss.backward()
-                    optimizer.step()
-                    all_pcd_loss.append(100 * pcd_loss.item())
-                    all_seg_loss.append(seg_loss.item())
-                    all_dpt_loss.append(dpt_loss.item())
-                # final_rot, final_trans = init_model.rotvec.detach().cpu().numpy(), init_model.trans.detach().cpu().numpy()
-                vis2d(dep, seg, path_list[-1], model_input[-1], out_path + str(j) + '/after/' + str(i) + '.png')
+                    a = pcd_loss * 300 + seg_loss
+                    a.backward()
+                    # except RuntimeError as e:
+                    #     print(e)
+                    #     break
+                    print('Start', j , ":", i)
+                    vis2d(dep, seg, path_list[-1], model_input[-1], out_path + str(j) + '/before/' + str(i) + '.png')
+                    init_model = PlainObj(*model_input)
+                    init_model.cuda()
+                    optimizer = optim.Adam(init_model.parameters(), lr=0.001)
+                    all_pcd_loss = []
+                    all_seg_loss = []
+                    all_dpt_loss = []
+                    dep, seg = None, None
+                    for _ in range(50):
+                        optimizer.zero_grad()
+                        pcd_loss, seg_loss, dpt_loss, dep, seg = init_model()
+                        all_loss = pcd_loss * 100 + seg_loss + 0.2 * dpt_loss # / seg_loss.item()  + dpt_loss / dpt_loss.item()
+                        all_loss.backward()
+                        optimizer.step()
+                        all_pcd_loss.append(100 * pcd_loss.item())
+                        all_seg_loss.append(seg_loss.item())
+                        all_dpt_loss.append(dpt_loss.item())
+                    # final_rot, final_trans = init_model.rotvec.detach().cpu().numpy(), init_model.trans.detach().cpu().numpy()
+                    vis2d(dep, seg, path_list[-1], model_input[-1], out_path + str(j) + '/after/' + str(i) + '.png')
 
-                # x = list(range(50))
-                # print(all_pcd_loss, all_dpt_loss, all_seg_loss)
-                # input()
-                fin_rot = init_model.rotvec.detach().cpu().numpy()
-                fin_trans = init_model.trans.detach().cpu().numpy()
-                # plt.plot(x, all_pcd_loss, label='cd')
-                # plt.plot(x, all_seg_loss, label='seg')
-                # plt.plot(x, all_dpt_loss, label='dep')
-                # plt.legend()
-                if not os.path.exists(out_path + str(j) + '/loss/'):
-                    os.mkdir(out_path + str(j) + '/loss/')
-                # plt.savefig(out_path + str(j) + '/loss/' + str(i) + '.jpg')
-                # plt.close('all')
-                # drawall_dpt_loss
-                fin_all_rot.append(fin_rot)
-                fin_all_trans.append(fin_trans)
-            else:
-                to_save_rot = np.array(fin_all_rot)
-                to_save_trans = np.array(fin_all_trans)
-                np.save(out_path + str(j) + '/rot.npy', to_save_rot)
-                np.save(out_path + str(j) + '/trans.npy', to_save_trans)
-                print('fin:', j)
-            # except RuntimeError as e:
-            #     print('err', e)
-            #     with open('/home/yunze/pose3d_lkb/output/err.txt', 'a') as f:
-            #         f.write(str(j) + '\n')
+                    # x = list(range(50))
+                    # print(all_pcd_loss, all_dpt_loss, all_seg_loss)
+                    # input()
+                    fin_rot = init_model.rotvec.detach().cpu().numpy()
+                    fin_trans = init_model.trans.detach().cpu().numpy()
+                    # plt.plot(x, all_pcd_loss, label='cd')
+                    # plt.plot(x, all_seg_loss, label='seg')
+                    # plt.plot(x, all_dpt_loss, label='dep')
+                    # plt.legend()
+                    if not os.path.exists(out_path + str(j) + '/loss/'):
+                        os.mkdir(out_path + str(j) + '/loss/')
+                    # plt.savefig(out_path + str(j) + '/loss/' + str(i) + '.jpg')
+                    # plt.close('all')
+                    # drawall_dpt_loss
+                    fin_all_rot.append(fin_rot)
+                    fin_all_trans.append(fin_trans)
+                else:
+                    to_save_rot = np.array(fin_all_rot)
+                    to_save_trans = np.array(fin_all_trans)
+                    np.save(out_path + str(j) + '/rot.npy', to_save_rot)
+                    np.save(out_path + str(j) + '/trans.npy', to_save_trans)
+                    print('fin:', j)
+            except:
+                continue
 
 
 def check_single_pipeline(target):
@@ -344,7 +333,30 @@ def load_articulated_object():
     art_input = path_list2artobj_input(*a[0][0][:5])
     from model import ArtObj
     init_model = ArtObj(*art_input)
+    init_model.cuda()
+    _, _, _, seg, dep = init_model()
+    # print(a[-1])
+    vis2d(dep[-1], seg[0], a[0][0][-1], art_input[-1], './art.jpg')
 
+
+def check_objects():
+    cnt = 0
+    for i in range(77):
+        base_path = './mug_check/'
+        print(os.path.exists(base_path + str(i) + '/trans.npy'))
+        if os.path.exists(base_path + str(i) + '/trans.npy'):
+            cnt += 1
+    print(cnt)
+
+
+def draw_teasor_object():
+    akoga = torch.load('all_list.pt')
+    for path_lists in akoga:
+        new_path_list = path_lists[0]
+        # model_input = path_list2plainobj_input(*new_path_list[:5])
+        from vis import showAnnoBox
+        cam_in_path, cur_dpt_path, cur_mask_path, cur_json_path, CAD_path, cam_out_path, cur_rgb_path = new_path_list
+        showAnnoBox(cur_json_path, cur_rgb_path, cam_in_path, "./bbox_check.jpg")
 
 if __name__ == "__main__":
-    load_articulated_object()
+    draw_teasor_object()

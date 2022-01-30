@@ -33,9 +33,9 @@ def get_color_map(N=256):
 
 def read_anno2objpath(file):
     mapping_dict = {
-        'bottleddrinks': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/瓶子/',
+        # 'bottleddrinks': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/瓶子/',
         'Watercup': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/马克杯/',
-        'Toycar': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/玩具车/'
+        # 'Toycar': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/玩具车/'
     }
     try:
         with open(file, 'r', errors='ignore') as f:
@@ -141,17 +141,19 @@ def read_rtd(file, num=0):
 
 def read_mask2bbox(filename, obj_color=1, denoise=True):
     h, w = 1280, 720
+    """
     # print('/mnt/8T/kangbo' + filename, os.path.exists('/mnt/8T/kangbo' + filename))
-    if os.path.exists('/mnt/8T/HOI4D_clean_mask' + filename):
-        mask = cv2.imread('/mnt/8T/HOI4D_clean_mask' + filename)
-        new_path, denoise = None, False
-    elif denoise:
-        new_path = '/mnt/8T/HOI4D_clean_mask' + os.path.dirname(filename)
-        if not os.path.exists(new_path):
-            os.makedirs(new_path)
-        mask = cv2.imread(filename)
-    else:
-        mask = cv2.imread(filename)
+    # rev_file_name = filename.replace("yiqi", "all/20211110")
+    # if os.path.exists('/mnt/8T/HOI4D_clean_mask' + rev_file_name):
+    #     mask = cv2.imread('/mnt/8T/HOI4D_clean_mask' + rev_file_name)
+    #     new_path, denoise = None, False
+    # elif denoise:
+    #     new_path = '/mnt/8T/HOI4D_clean_mask' + os.path.dirname(filename)
+    #     if not os.path.exists(new_path):
+    #         os.makedirs(new_path)
+    #     mask = cv2.imread(filename)
+    # else:
+    #     mask = cv2.imread(filename)
     # print("denoise", denoise)
     dx = [-1, -1, -1, 0, 0, 1, 1, 1]
     dy = [-1, 0, 1, 1, -1, -1, 0, 1]
@@ -175,7 +177,17 @@ def read_mask2bbox(filename, obj_color=1, denoise=True):
         cv2.imwrite('/mnt/8T/HOI4D_clean_mask' + filename, clean_mask)
     else:
         clean_mask = mask.copy()
-
+    """
+    # rev_file_name = filename.replace("yiqi", "all/20211110")
+    # assert os.path.exists(filename)
+    clean_mask = cv2.imread(filename)
+    w, h, _ = clean_mask.shape
+    if h != 1920:
+        coef = 1.5
+        if os.path.exists(filename):
+            clean_mask = cv2.imread(filename.replace("yiqi", "all/20211110"))
+    else:
+        coef = 1
     color_map = get_color_map()
     obj_idx = np.where((clean_mask == color_map[obj_color][::-1]).all(axis=2))
     if obj_color == 3:
@@ -208,7 +220,13 @@ def read_mask2bbox(filename, obj_color=1, denoise=True):
                 crop_min_x -= crop_max_x - w
                 crop_max_x -= crop_max_x - w
 
-    x1,x2,y1,y2=round(crop_min_x * 1.5)+1, round(crop_max_x * 1.5)-1,round(crop_min_y * 1.5)+1, round(crop_max_y * 1.5)-1
+    x1,x2,y1,y2=round(crop_min_x * coef)+1, round(crop_max_x * coef)-1,round(crop_min_y * coef)+1, round(crop_max_y * coef)-1
+    if x1 <= 0:
+        x1 = 0
+        if x2 <= 0:
+            x2 = 10
+    if y1 <= 0:
+        y1 = 0
 
     return int(x1), int(x2), int(y1), int(y2), clean_mask #int(cx), int(cy)  #, d_size * 1.5)
 
@@ -339,7 +357,8 @@ def annoed_path_generator_from_total_json(total_path, articulated=False):
         yield all_ret_list
 
 
-def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_path, out_src_rot=None, outsrc_trans=None):
+def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_path, out_src_rot=None, outsrc_trans=None,
+                             denoise=False):
     rot, trans, dim = read_rtd(anno_path)
     if out_src_rot is not None:
         rot = out_src_rot
@@ -348,7 +367,7 @@ def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_pa
     vertices, triangles = read_CAD_model(CAD_path, dim)
     depth2d = cv2.imread(dpt_path, cv2.IMREAD_UNCHANGED)
     camMat = np.load(cam_in_path)
-    x1, x2, y1, y2, clean_mask = read_mask2bbox(mask_path)
+    x1, x2, y1, y2, clean_mask = read_mask2bbox(mask_path, denoise=denoise)
     crop_list = [x1, x2, y1, y2]
 
     depth2d = np.array(depth2d, dtype=np.float32) / 1000
@@ -456,35 +475,6 @@ def path_list2artobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_meta
     pcd_list = [pcd_base, pcd_part, pcd_all]
 
     return [axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd_list, camMat, crop_list]
-
-
-def articulated_object_path_generator_from_total_json(total_path, required_range=None):
-    for data in folder_path_generator_from_total_json(total_path):
-        cam_in_path, mask_path, cam_out_path, depth_path, rgb_path, json_path, CAD_path = data
-
-        all_ret_list = []
-
-        if required_range is None:
-            required_range = range(300)
-
-        for num in required_range:
-            cur_mask_path = mask_path + str(num).zfill(5) + '.png'
-            cur_dpt_path = depth_path + '/' + str(num) + '.png'
-            cur_json_path = json_path + '/' + '0' + '.json'
-            cur_rgb_path = rgb_path + '/' + str(num) + '.jpg'
-
-            if not os.path.exists(cur_json_path):
-                cur_json_path = json_path + '/' + '0'.zfill(5) + '.json'
-
-            all_ret_list.append([cam_in_path,
-                                 cur_dpt_path,
-                                 cur_mask_path,
-                                 cur_json_path,
-                                 CAD_path,
-                                 cam_out_path,
-                                 cur_rgb_path,
-                                 ])
-        yield all_ret_list
 
 
 def every_path_generator_from_total_json(total_path, required_range=None):
