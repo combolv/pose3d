@@ -437,8 +437,7 @@ class Constraints(nn.Module):
     def thetaLimits(self):
         MINBOUND = -5.
         MAXBOUND = 5.
-        self.validThetaIDs = torch.IntTensor([0, 1, 2, 3, 4, 5, 6, 8, 11, 13, 14, 15, 17, 20, 21, 22, 23, 25, 26, 29,
-                                              30, 31, 32, 33, 35, 38, 39, 40, 41, 42, 44, 46, 47]).long().to(self.cuda_device)#!!!?
+        self.validThetaIDs = torch.IntTensor([0, 1, 2, 3, 4, 5, 6, 8, 11, 13, 14, 15, 17, 20, 21, 22, 23, 25, 26, 29, 30, 31, 32, 33, 35, 38, 39, 40, 41, 42, 44, 46, 47]).long().cuda()
         #7,9,10,12,16,18,19,24,27,28,34,36,37,43,45 15个
         #48-15=33个
         # self.invalidThetaIDs = np.array([7, 9, 10, 12, 16, 18, 19, 24,
@@ -449,19 +448,19 @@ class Constraints(nn.Module):
                 invalidThetaIDsList.append(i)
         self.invalidThetaIDs = np.array(invalidThetaIDsList)
 
-        self.minThetaVals = torch.FloatTensor([MINBOUND, MINBOUND, MINBOUND,  # global rot
+        self.minThetaVals = nn.Parameter(torch.FloatTensor([MINBOUND, MINBOUND, MINBOUND,  # global rot
                                       0, -0.15, 0.1, -0.3, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # index
                                       MINBOUND, -0.15, 0.1, -0.5, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # middle
                                       -1.5, -0.15, -0.1, MINBOUND, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # pinky
                                       -0.5, -0.25, 0.1, -0.4, MINBOUND, -0.0, MINBOUND, MINBOUND, 0,  # ring
-                                               MINBOUND, -0.83, -0.0, -0.15, MINBOUND, 0, MINBOUND, -0.5, -1.57, ]).to(self.cuda_device)  # thumb
+                                               MINBOUND, -0.83, -0.0, -0.15, MINBOUND, 0, MINBOUND, -0.5, -1.57, ])) # thumb
 
-        self.maxThetaVals = torch.FloatTensor([MAXBOUND, MAXBOUND, MAXBOUND,  # global
+        self.maxThetaVals = nn.Parameter(torch.FloatTensor([MAXBOUND, MAXBOUND, MAXBOUND,  # global
                                       0.45, 0.2, 1.8, 0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # index
                                       MAXBOUND, 0.15, 2.0, -0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # middle
                                       -0.2, 0.15, 1.6, MAXBOUND, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # pinky
                                       -0.4, 0.10, 1.6, -0.2, MAXBOUND, 2.0, MAXBOUND, MAXBOUND, 1.25,  # ring
-                                               MAXBOUND, 0.66, 0.5, 1.6, MAXBOUND, 0.5, MAXBOUND, 0, 1.08]).to(self.cuda_device)  # thumb
+                                               MAXBOUND, 0.66, 0.5, 1.6, MAXBOUND, 0.5, MAXBOUND, 0, 1.08]))  # thumb
 
         self.fullThetaMat = np.zeros(
             (48, len(self.validThetaIDs)), dtype=np.float32)  # 48x25
@@ -469,6 +468,8 @@ class Constraints(nn.Module):
             self.fullThetaMat[self.validThetaIDs[i], i] = 1.0
         self.minThetaVals.requires_grad = False
         self.maxThetaVals.requires_grad = False
+        self.validThetaIDs.requires_grad = False
+
 
     def forward(self, theta, isValidTheta=False):
         '''
@@ -506,8 +507,9 @@ class HandObj(nn.Module):
     """
 
     def __init__(self, batch_size, ncomps, poseCoeff, trans, beta, kps2d, vis,
-                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920, w=1920, h=1080, pca = True, flat_bool=True):
+                 handseg, objmask, handdpt, handpcd, camMat, gpu, crop=(0, 1080, 0, 1920), size=1920, w=1920, h=1080, pca = True, flat_bool=True, vis_bool = False):
         super(HandObj, self).__init__()
+        self.visbool = vis_bool
         self.batch_size = batch_size
         self.theta = nn.Parameter(torch.FloatTensor(
             poseCoeff).expand(batch_size, poseCoeff.shape[0]))
@@ -520,10 +522,8 @@ class HandObj(nn.Module):
         self.pcdloss = EMDLoss()
         self.cdloss = ChamferDistance()
 
-        # print(camMat)
-        # print(handpcd.shape)  # (5693, 3)
         self.cam2pix = projCamera(camMat)
-        # self.Kps3Dto2D = projKps(camMat)
+
         self.poseConstraint = Constraints(gpu)
 
         self.seg = nn.Parameter(torch.FloatTensor(handseg))
@@ -550,6 +550,7 @@ class HandObj(nn.Module):
         self.center.requires_grad = False
         self.camMat = nn.Parameter(torch.FloatTensor(camMat))
         self.camMat.requires_grad = False
+
     
     def projCamera(self, mesh):
         mesh = mesh.permute(0, 2, 1)
@@ -697,7 +698,8 @@ class HandObj(nn.Module):
         #print(dep[0, 0], dep[550, 858], dep[509, 863], dep[566, 792])
         img = image[:, :, :3]
         img[alpha < 0.5] = 0
-        cv2.imwrite("./ex1.png", image[:, :, :3])
+        if self.visbool:
+            cv2.imwrite("./ex1.png", image[:, :, :3])
         p = o3d.geometry.PointCloud()
         pts_depth_ = dep[alpha > 0.5][:, 0]
         pts_y_, pts_x_ = np.where(alpha > 0.5)
@@ -744,11 +746,12 @@ class HandObj(nn.Module):
         # print(rendered_seg.shape, self.seg.shape, self.msk.shape)
 
         rendered_seg_clip = (rendered_seg > 0.5).int()
-        
-        img = (rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]) * self.msk[:max_idy, :max_idx, 0]
-        # img = rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]
-        img = (255*img.detach().cpu().numpy()).astype(np.uint8)
-        cv2.imwrite("./ex2.png", img)
+        if self.visbool:
+            img = (rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]) * self.msk[:max_idy, :max_idx, 0]
+            # img = rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]
+            img = (255*img.detach().cpu().numpy()).astype(np.uint8)
+
+            cv2.imwrite("./ex2.png", img)
         
 
         # seg_loss = torch.mean(torch.abs(rendered_seg_clip - self.seg[:max_idy, :max_idx, 0]) * self.msk[:max_idy, :max_idx, 0])
@@ -772,8 +775,9 @@ class HandObj(nn.Module):
             (projected_joints - self.kps2d) * self.vis))
         # print((projected_joints - self.kps2d)*self.vis)
         
-        wrist_depth_loss = torch.abs(gt_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()] - r_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()]) \
-            * (gt_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()] > 0)
+        # wrist_depth_loss = torch.abs(gt_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()] - r_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()]) \
+        #     * (gt_depth[self.kps2d[0][1].int(), self.kps2d[0][0].int()] > 0)
+        wrist_depth_loss = [0]
 
         results = {
             'seg': rendered_seg,
