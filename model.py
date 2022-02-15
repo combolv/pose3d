@@ -370,7 +370,7 @@ class ArtObj(nn.Module):
         self.crop = [x1 - int(np.round(camMat[1, 2])) + f, x2 - int(np.round(camMat[1, 2])) + f,
                      y1 - int(np.round(camMat[0, 2])) + f, y2 - int(np.round(camMat[0, 2])) + f]
 
-        self.srf_layer = SoftRasLayer(2 * f, crop_list)
+        self.srf_layer = SoftRasLayer(2 * f, self.crop)
 
 
     def forward(self):
@@ -385,11 +385,19 @@ class ArtObj(nn.Module):
 
         both_faces = torch.cat([base_faces, part_faces], dim=1)
         both_depth = torch.cat([base_depth, part_depth], dim=1)
+        # self.srf_layer.crop = [0, 3000, 0, 3000]
         base_seg, base_depth2d = self.srf_layer(base_faces, base_depth)
         both_seg, both_depth2d = self.srf_layer(both_faces , both_depth)
         part_seg_canonical, part_depth2d_canonical = self.srf_layer(part_faces_canonical, part_depth_canonical)
-
+        #
         all_seg = torch.stack([base_seg, part_seg_canonical, both_seg])
+        # print(torch.min(self.mesh_base.vertices, dim=0), torch.max(self.mesh_base.vertices, dim=0))
+        # print(self.para[0], self.para[1])
+        # print(base_seg.size(), base_depth2d.size())
+        # print(torch.min(base_faces[..., 0]), torch.max(base_faces[..., 0]))
+        # print(torch.min(base_faces[..., 1]), torch.max(base_faces[..., 1]))
+        # print(torch.min(base_faces[..., 2]), torch.max(base_faces[..., 2]))
+        # print(self.srf_layer.crop)
         all_depth2d = torch.stack([base_depth2d, part_depth2d_canonical, both_depth2d])
 
         seg_loss, depth_loss = self.criterion2d(all_seg, all_depth2d, self.msk, self.seg)
@@ -407,8 +415,8 @@ class ArtObj(nn.Module):
         else:
             pcd_part = None
 
-        if self.method == self.BOTH:
-            _, constraint_loss = self.pcdloss(self.pcd.unsqueeze(0), self.pcd1.unsqueeze(0))
+        # if self.method == self.BOTH:
+        #     _, constraint_loss = self.pcdloss(self.pcd.unsqueeze(0), self.pcd1.unsqueeze(0))
         """
         if self.method == self.BOTH:
             # part_Rinv approx part_Rinv_canonical
@@ -422,7 +430,7 @@ class ArtObj(nn.Module):
         """
 
         return [pcd_loss, pcd_base, pcd_part], seg_loss, depth_loss, all_seg, all_depth2d[..., 0]
-
+        # return None, None, None, base_seg.unsqueeze(0), base_depth2d[..., 0].unsqueeze(0)
 
 class Constraints(nn.Module):
     """

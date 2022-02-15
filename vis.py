@@ -17,6 +17,8 @@ def vis3d(r, T, rgb_path, depth_path, objfile, cam_in_path, crop_list = None, js
     depth_crop = np.zeros_like(depth_raw)
     if crop_list is not None:
         depth_crop[crop_list[0]:crop_list[1], crop_list[2]:crop_list[3]] = depth_raw[crop_list[0]:crop_list[1], crop_list[2]:crop_list[3]]
+    else:
+        depth_crop = depth_raw
     depth_raw = o3d.geometry.Image(depth_crop)
     rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
             color_raw, depth_raw, convert_rgb_to_intensity=False )
@@ -96,38 +98,39 @@ def vis3d_art():
     pass
 
 
-def showAnnoBox(jsonPathOrMeta, rgb_path, cam_path, out_file):
-    if isinstance(jsonPathOrMeta, str):
-        from loadfile import read_rtd
-        rot, trans, dim = read_rtd(jsonPathOrMeta)
-    else:
-        rot, trans, dim = jsonPathOrMeta
-    x, y, z = dim
-    org_pts = [[0, 0, 0], [x, y, z],
-               [0, 0, z], [x, y, 0],
-               [0, y, 0], [x, 0, z],
-               [x, 0, 0], [0, y, z]]
-    line_pairs = [[0, 2], [0, 4], [0, 6],
-                  [1, 3], [1, 5], [1, 7],
-                  [2, 5], [2, 7],
-                  [4, 3], [4, 7],
-                  [6, 3], [6, 5]]
-    org_pts = np.array(org_pts, dtype=np.float32)
-    org_pts -= dim / 2
-    rot_mat = Rt.from_rotvec(rot).as_matrix().T
-    org_pts = org_pts @ rot_mat + trans
-    camMat = np.load(cam_path)
-    org_pts = org_pts @ camMat.T
-    org_pts[..., 0] /= org_pts[..., 2]
-    org_pts[..., 1] /= org_pts[..., 2]
+def showAnnoBox(jsonPathOrMeta, rgb_path, cam_path, out_file, part_count=1):
     rgb = cv2.imread(rgb_path)
-    for line_pair in line_pairs:
-        start_point = org_pts[line_pair[0]][:2]
-        end_point = org_pts[line_pair[1]][:2]
-        green = (0, 255, 0)
-        start_point = start_point.astype(np.int)
-        end_point = end_point.astype(np.int)
-        cv2.line(rgb, start_point, end_point, green, thickness=5)
+    for i in range(part_count):
+        if isinstance(jsonPathOrMeta, str):
+            from loadfile import read_rtd
+            rot, trans, dim = read_rtd(jsonPathOrMeta, num=i)
+        else:
+            rot, trans, dim = jsonPathOrMeta[i]
+        x, y, z = dim
+        org_pts = [[0, 0, 0], [x, y, z],
+                   [0, 0, z], [x, y, 0],
+                   [0, y, 0], [x, 0, z],
+                   [x, 0, 0], [0, y, z]]
+        line_pairs = [[0, 2], [0, 4], [0, 6],
+                      [1, 3], [1, 5], [1, 7],
+                      [2, 5], [2, 7],
+                      [4, 3], [4, 7],
+                      [6, 3], [6, 5]]
+        org_pts = np.array(org_pts, dtype=np.float32)
+        org_pts -= dim / 2
+        rot_mat = Rt.from_rotvec(rot).as_matrix().T
+        org_pts = org_pts @ rot_mat + trans
+        camMat = np.load(cam_path)
+        org_pts = org_pts @ camMat.T
+        org_pts[..., 0] /= org_pts[..., 2]
+        org_pts[..., 1] /= org_pts[..., 2]
+        for line_pair in line_pairs:
+            start_point = org_pts[line_pair[0]][:2]
+            end_point = org_pts[line_pair[1]][:2]
+            green = (0, 255, 0)
+            start_point = start_point.astype(np.int)
+            end_point = end_point.astype(np.int)
+            cv2.line(rgb, start_point, end_point, green, thickness=5)
     cv2.imwrite(out_file, rgb)
 
 
