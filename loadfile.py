@@ -34,8 +34,8 @@ def get_color_map(N=256):
 def read_anno2objpath(file):
     mapping_dict = {
         # 'bottleddrinks': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/瓶子/',
-        'Watercup': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/马克杯/',
-        # 'Toycar': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/玩具车/'
+        # 'Watercup': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/马克杯/',
+        'Toycar': '/mnt/8T/HOI4D_CAD_Model/models_watertight_scale/玩具车/'
     }
     try:
         with open(file, 'r', errors='ignore') as f:
@@ -53,6 +53,12 @@ def read_anno2objpath(file):
         num = int(file[N_idx+1:N_idx+3])
     except:
         num = int(file[N_idx+1])
+
+    H_idx = file.index("80000") + 5
+    try:
+        assert file[H_idx] == '2'
+    except:
+        return ''
 
     out_file_name = mapping_dict[labels] + str(num).zfill(3) + '.obj'
     if os.path.exists(out_file_name):
@@ -79,15 +85,11 @@ def read_anno2articulated_objpath(file):
     except:
         num = int(file[N_idx+1])
     num_str = str(num).zfill(3)
-    CAD_part_canonical_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/笔记本电脑/' + num_str + "/objs/new-0-align.obj"
-    CAD_base_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-1.obj'
-    CAD_part_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-0.obj'
-    if num == 41:
-        CAD_base_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-2.obj'
-        CAD_part_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + '/objs/new-1.obj'
-        CAD_part_canonical_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/笔记本电脑/' + num_str + "/objs/new-1-align.obj"
+    CAD_part_canonical_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/laptop/' + num_str + "/objs/new-0-align.obj"
+    CAD_base_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/laptop/' + num_str + '/objs/new-1.obj'
+    CAD_part_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/laptop/' + num_str + '/objs/new-0.obj'
 
-    mob_path = '/mnt/8T/HOI4D_CAD_Model/mobility_annotations/笔记本电脑/' + num_str + "/mobility_v2.json"
+    mob_path = '/mnt/8T/HOI4D_CAD_Model/part_annotations/laptop/' + num_str + "/mobility_v2.json"
 
     # print(mob_path, os.path.exists(mob_path))
     # input("cont?")
@@ -250,7 +252,8 @@ def read_CAD_model_part(path, scale, trans):
     return vertices, triangles
 
 
-def read_CAD_model(CAD_path, dim, keep_translation=False, return_translation=False):
+def read_CAD_model(CAD_path, dim, keep_translation=False, return_translation=False,
+                   label=None):
     if os.path.exists('/mnt/8T/kangbo' + CAD_path + 'v.npy'):
         vertices = np.load('/mnt/8T/kangbo' + CAD_path + 'v.npy')
         triangles = np.load('/mnt/8T/kangbo' + CAD_path + 't.npy')
@@ -270,12 +273,16 @@ def read_CAD_model(CAD_path, dim, keep_translation=False, return_translation=Fal
         triangles = np.asarray(mesh_smp.triangles)
         v_max = np.max(vertices, axis=0)
         v_min = np.min(vertices, axis=0)
+
         v_center = (v_max + v_min) / 2
         v_size = v_max - v_min
 
         vertices -= v_center
         scalar = v_size / dim
+        if label == 'laptop':
+            scalar = scalar[:2]
         max_scalar = np.max(scalar)
+
         if max_scalar > 1.:
             vertices /= max_scalar
             coef = max_scalar
@@ -380,7 +387,19 @@ def path_list2plainobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_pa
     # load point cloud from depth
     intrinsics = o3d.camera.PinholeCameraIntrinsic(1920, 1080, camMat[0, 0], camMat[1, 1], camMat[0, 2], camMat[1, 2])
     pcd = o3d.geometry.PointCloud.create_from_depth_image(depth3d, intrinsics, stride=2)
-    pcd = np.asarray(pcd.points)
+
+    voxel_down_pcd = pcd.voxel_down_sample(voxel_size=0.001)
+
+    cl, ind = voxel_down_pcd.remove_radius_outlier(nb_points=350, radius=0.05)
+    vertices_ = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(vertices))
+    R = Rt.from_rotvec(rot).as_matrix()
+    mesh_mv = vertices_.translate(trans)
+    mesh_mv.rotate(R, center=trans)
+    # o3d.io.write_point_cloud("test2.ply", mesh_mv)
+    # o3d.io.write_point_cloud("test.ply", cl)
+    # print(len(cl.points))
+    # input()
+    pcd = np.asarray(cl.points)
 
     rot_matrix = Rt.from_rotvec(rot).as_matrix()
     pcd = pcd @ rot_matrix - rot_matrix.T @ trans
@@ -421,21 +440,27 @@ class Axis:
 
 
 def path_list2artobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_meta,
-                           out_src_rot=None, outsrc_trans=None, out_src_theta=None):
+                           out_src_rot=None, out_src_trans=None,
+                           out_src_part_rot=None, out_src_part_trans=None):
     CAD_part_canonical_path, CAD_base_path, CAD_part_path, mob_path = CAD_meta
     rot_base, trans_base, dim_base = read_rtd(anno_path, 0)
     rot_part, trans_part, dim_part = read_rtd(anno_path, 1)
-    theta = np.linalg.norm((Rt.from_rotvec(rot_base) * Rt.from_rotvec(rot_part).inv()).as_rotvec())
     if out_src_rot is not None:
-        rot = out_src_rot
-    if outsrc_trans is not None:
-        trans = outsrc_trans
-    if out_src_theta is not None:
-        theta = out_src_theta
-    vertices_base, triangles_base, base_translation, coef = read_CAD_model(CAD_base_path, dim_base, return_translation=True)
+        rot_base = out_src_rot
+    if out_src_trans is not None:
+        trans_base = out_src_trans
+    if out_src_part_rot is not None:
+        rot_part = out_src_part_rot
+    if out_src_part_trans is not None:
+        trans_part = out_src_part_trans
+    theta = np.linalg.norm((Rt.from_rotvec(rot_base) * Rt.from_rotvec(rot_part).inv()).as_rotvec())
+
+    vertices_base, triangles_base, base_translation, coef = read_CAD_model(CAD_base_path, dim_base, return_translation=True,
+                                                                           label='laptop')
     vertices_part, triangles_part = read_CAD_model_part(CAD_part_path, coef, base_translation)
     vertices_part += base_translation
-    vertices_part_canonical, triangles_part_canonical = read_CAD_model(CAD_part_canonical_path, dim_part)
+    vertices_part_canonical, triangles_part_canonical = read_CAD_model(CAD_part_canonical_path, dim_part,
+                                                                       label='laptop')
 
     depth2d = cv2.imread(dpt_path, cv2.IMREAD_UNCHANGED)
     camMat = np.load(cam_in_path)
@@ -477,8 +502,8 @@ def path_list2artobj_input(cam_in_path, dpt_path, mask_path, anno_path, CAD_meta
     return [axis_meta, para_meta, mesh_meta, mask_meta, depth2d, pcd_list, camMat, crop_list]
 
 
-def every_path_generator_from_total_json(total_path, required_range=None):
-    for data in folder_path_generator_from_total_json(total_path):
+def every_path_generator_from_total_json(total_path, required_range=None, articulated=False):
+    for data in folder_path_generator_from_total_json(total_path, articulated):
         cam_in_path, mask_path, cam_out_path, depth_path, rgb_path, json_path, CAD_path = data
 
         all_ret_list = []

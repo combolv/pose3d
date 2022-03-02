@@ -276,8 +276,8 @@ class SegDptLossBatch(nn.Module):
         seg_sum, seg_prod = masked_seg + gt_seg, masked_seg * gt_seg
         seg_loss = 1 - torch.mean(torch.abs(seg_prod), (1, 2)) / torch.mean(torch.abs(seg_sum - seg_prod), (1, 2))
         seg_mask = (torch.stack([batch_seg.detach()] * 3, dim=-1) > 0.5).int()
-        # dpt_loss = torch.mean(torch.abs(batch_depth - self.dpt * seg_mask) * batch_msk, keepdim=0)
-        return seg_loss, None #, dpt_loss
+        # dpt_loss = torch.mean(torch.abs(batch_depth - batch_depth * seg_mask) * batch_msk, keepdim=0)
+        return seg_loss, None
 
 
 class SoftRasLayer(nn.Module):
@@ -332,12 +332,12 @@ class ArtObj(nn.Module):
         self.vec2mat = invRodrigues()
 
         # load point cloud
-        if len(pcd[0] < 10):
+        if len(pcd[0]) < 10:
             self.pcd0 = None
         else:
             self.pcd0 = nn.Parameter(torch.FloatTensor(pcd[0]))
             self.pcd0.requires_grad = False
-        if len(pcd[1] < 10):
+        if len(pcd[1]) < 10:
             self.pcd1 = None
         else:
             self.pcd1 = nn.Parameter(torch.FloatTensor(pcd[1]))
@@ -402,16 +402,21 @@ class ArtObj(nn.Module):
 
         seg_loss, depth_loss = self.criterion2d(all_seg, all_depth2d, self.msk, self.seg)
 
-        if self.method == self.SEP12DoF:
-            _, pcd_loss = self.pcdloss(torch.cat((base_verts, part_verts), dim=1), self.pcd.unsqueeze(0))
-        else:
-            pcd_loss = None
-        if self.pcd0 is not None and self.method != self.GLB7DoF:
+        # if self.method == self.SEP12DoF:
+
+        _, pcd_loss = self.pcdloss(torch.cat((base_verts, part_verts), dim=1), self.pcd.unsqueeze(0))
+        # else:
+        #     pcd_loss = None
+        # if self.pcd0 is not None and self.method != self.GLB7DoF:
+        if self.pcd0 is not None:
             _, pcd_base = self.pcdloss(base_verts, self.pcd0.unsqueeze(0))
+            pcd_base = torch.mean(pcd_base)
         else:
             pcd_base = None
-        if self.pcd1 is not None and self.method != self.GLB7DoF:
+        # if self.pcd1 is not None and self.method != self.GLB7DoF:
+        if self.pcd1 is not None:
             _, pcd_part = self.pcdloss(part_verts_canonical, self.pcd1.unsqueeze(0))
+            pcd_part = torch.mean(pcd_part)
         else:
             pcd_part = None
 
@@ -429,7 +434,8 @@ class ArtObj(nn.Module):
         # Need Umeyama algo. to find rel. pose from can. to part
         """
 
-        return [pcd_loss, pcd_base, pcd_part], seg_loss, depth_loss, all_seg, all_depth2d[..., 0]
+        return [torch.mean(pcd_loss), pcd_base, pcd_part], \
+               seg_loss, depth_loss, all_seg, all_depth2d[..., 0]
         # return None, None, None, base_seg.unsqueeze(0), base_depth2d[..., 0].unsqueeze(0)
 
 class Constraints(nn.Module):
